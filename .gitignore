@@ -1,0 +1,11 @@
+node_modules/
+dist/
+client/dist/
+client/dist-cvm/
+server/dist/
+.space-build/
+.space-build-cvm/
+.harness/
+app.db
+*.tsbuildinfo
+*.muse-github-snapshot-sync.json
