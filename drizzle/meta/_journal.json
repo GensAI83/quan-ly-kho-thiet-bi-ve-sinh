@@ -22,6 +22,13 @@
       "when": 1794213942197,
       "tag": "0003_stock_safety_and_ops",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1794218745196,
+      "tag": "0004_auth_and_debt_status",
+      "breakpoints": true
     }
   ]
 }

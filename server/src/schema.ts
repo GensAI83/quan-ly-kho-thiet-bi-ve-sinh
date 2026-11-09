@@ -110,6 +110,8 @@ export const staff = sqliteTable("staff", {
   pinSalt: text("pin_salt").notNull().default(""),
   active: integer("active").notNull().default(1), // 0 or 1
   mustChangePin: integer("must_change_pin").notNull().default(0), // 0 or 1
+  failedAttempts: integer("failed_attempts").notNull().default(0),
+  lockedUntil: integer("locked_until", { mode: "timestamp_ms" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 
@@ -163,7 +165,7 @@ export const debts = sqliteTable("debts", {
   dueDate: text("due_date").notNull().default(""),
   refCode: text("ref_code").notNull().default(""),
   note: text("note").notNull().default(""),
-  status: text("status", { enum: ["open", "paid", "overdue"] }).notNull().default("open"),
+  status: text("status", { enum: ["open", "paid", "overdue", "cancelled"] }).notNull().default("open"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
 });
 

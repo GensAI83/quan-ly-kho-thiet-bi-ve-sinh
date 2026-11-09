@@ -1,0 +1,54 @@
+=== HARNESS TÁI HIỆN 5 LỖI — quản lý kho thiết bị vệ sinh ===
+Ngày chạy: 2026-11-09T10:11:49.518Z
+  [PASS] 1a createStaff admin KHÔNG token phải lỗi — {"ok":false,"id":0,"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] 1b sales tạo phiếu xuất phải lỗi — {"ok":false,"error":"Chỉ quản trị viên hoặc thủ kho được tạo phiếu nhập/xuất.","newStock":0,"refCode":"","version":0}
+  [PASS] 1c không token tạo phiếu xuất phải lỗi — {"ok":false,"error":"Cần đăng nhập để thực hiện thao tác này.","newStock":0,"refCode":"","version":0}
+  [PASS] 1d-1 admin nhập kho được — {"ok":true,"error":null,"newStock":11,"refCode":"PN20261109-8533","version":1}
+  [PASS] 1d-2 thủ kho xuất kho được — {"ok":true,"error":null,"newStock":10,"refCode":"PX20261109-9621","version":2}
+  [PASS] 1d-3 sales tạo đơn được — {"ok":true,"error":null,"orderCode":"DH20261109-9676","id":1}
+  [PASS] 1d-4 sales xóa sản phẩm phải lỗi — {"ok":false,"error":"Chỉ quản trị viên được xoá sản phẩm.","discontinued":false}
+  [PASS] 1d-5 sales đổi giá phải lỗi — {"ok":false,"error":"Chỉ quản trị viên được đổi giá."}
+  [PASS] 1d-6 sales xem danh sách nhân viên phải lỗi — {"staff":[],"error":"Chỉ quản trị viên được xem danh sách nhân viên."}
+  [PASS] 1d-6b không token xem danh sách nhân viên phải lỗi — {"staff":[],"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] 1e token sai gọi getDashboard phải lỗi hết hạn — {"__thrown":true,"error":"Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại."}
+  [PASS] 1f không token đọc danh sách sản phẩm phải lỗi — {"__thrown":true,"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] 1g không token tạo đơn phải lỗi — {"ok":false,"error":"Cần đăng nhập để thực hiện thao tác này.","orderCode":"","id":0}
+  [PASS] 1h-0 đăng nhập đúng PIN bán hàng được (trước khi dò) — {"ok":true,"token":"c70c88675e23611ff6b83f26ae41cde35d8d489e915e756c","error":null,"staff":{"id":3,"name":"Bán hàng B","role":"sales","mustChangePin":0}}
+  [PASS] 1h-2 sau 5 lần sai, đăng nhập đúng PIN phải bị khóa — {"ok":false,"token":"","error":"Tài khoản tạm khóa 15 phút do nhập sai mã PIN quá nhiều lần. Vui lòng thử lại sau.","staff":null}
+  [PASS] 2a tạo đợt kiểm kê — {"ok":true,"id":1,"code":"KK20261109-4158","error":null}
+  [PASS] 2b lưu số đếm 9 khi sổ là 4 (diff +5) — {"ok":true,"error":null}
+  [PASS] 2c nhập thêm 5 giữa lúc đếm và chốt (tồn phải là 9) — stock=9
+  [PASS] 2d chốt kiểm kê: tồn phải là 14 (4 + diff 5 + nhập 5) — stock=14, close={"ok":true,"error":null,"diffs":[{"productSku":"BC-0824","productName":"SP Thử","systemQty":9,"countedQty":9,"diff":0,"systemQtyAtCount":4,"systemQtyAtClose":9,"appliedDiff":5}]}
+  [PASS] 2e phiếu điều chỉnh ghi before 9 -> after 14, số lượng 5 — [{"id":3,"productId":1,"productSku":"BC-0824","productName":"SP Thử","type":"adjust","quantity":5,"beforeStock":9,"afterStock":14,"unitCost":50,"reason":"Kiểm kê KK20261109-4158","refCode":"KK20261109-4158","partner":"","note":"Kiểm kê KK20261109-4158: đếm 9, sổ lúc đếm 4, sổ lúc chốt 9, điều chỉnh +5","requestKey":null,"actor":"Thủ kho A","createdAt":"2026-11-09T10:11:49.647Z"}]
+  [PASS] 2f diffs trả về tính theo tồn lúc chốt (systemQty 9, đếm 9) — [{"productSku":"BC-0824","productName":"SP Thử","systemQty":9,"countedQty":9,"diff":0,"systemQtyAtCount":4,"systemQtyAtClose":9,"appliedDiff":5}]
+  [PASS] 3i-a xác nhận đơn bán 2 (tồn 8) — stock=8
+  [PASS] 3i-b trả 1 (tồn 9, partially_returned) — stock=9, ret={"ok":true,"error":null,"refCode":"DH20261109-4717","newStatus":"partially_returned"}
+  [PASS] 3i-c trả tiếp 1 nữa phải ĐƯỢC (trước sửa: bị chặn) — stock=10, ret={"ok":true,"error":null,"refCode":"DH20261109-4717","newStatus":"returned"}
+  [PASS] 3i-d trả hết 2 rồi hủy đơn: tồn phải là 10 — stock=10, cancel={"ok":true,"error":null,"pendingRestocks":[]}
+  [PASS] 3ii-a trả 1 (tồn 9) — stock=9
+  [PASS] 3ii-a2 trả quá số còn trả được (đã trả 1/2, đòi trả 2) phải bị chặn — ret={"ok":false,"error":"\"SP Thử\" chỉ còn trả được 1 (đã trả 1/2).","refCode":"","newStatus":"partially_returned"}
+  [PASS] 3ii-b trả 1 rồi hủy đơn: tồn phải là 10 (trước sửa: 11) — stock=10, cancel={"ok":true,"error":null,"pendingRestocks":[]}
+  [PASS] 4a-a xác nhận đơn sinh công nợ 100 còn dư — {"id":1,"partnerName":"Khách Thử","partnerType":"customer","kind":"receivable","totalAmount":100,"paidAmount":0,"remaining":100,"dueDate":"","refCode":"DH20261109-3956","note":"Công nợ đơn DH20261109-3956","status":"open","createdAt":"2026-11-09T10:11:49.797Z"}
+  [PASS] 4a-b hủy đơn: công nợ còn lại 0 và trạng thái cancelled — {"id":1,"partnerName":"Khách Thử","partnerType":"customer","kind":"receivable","totalAmount":0,"paidAmount":0,"remaining":0,"dueDate":"","refCode":"DH20261109-3956","note":"Công nợ đơn DH20261109-3956 | Đã hủy đơn — công nợ đã xóa","status":"cancelled","createdAt":"2026-11-09T10:11:49.797Z"}
+  [PASS] 4a2-a cọc 40 trước khi hủy — {"ok":true,"error":null,"depositAmount":40,"paymentStatus":"partial"}
+  [PASS] 4a2-b hủy sau khi đã thu 40: total=40, paid=40, còn 0, cancelled — {"id":1,"partnerName":"Khách Thử","partnerType":"customer","kind":"receivable","totalAmount":40,"paidAmount":40,"remaining":0,"dueDate":"","refCode":"DH20261109-2770","note":"Công nợ đơn DH20261109-2770 | Đã hủy đơn — công nợ đã xóa","status":"cancelled","createdAt":"2026-11-09T10:11:49.817Z"}
+  [PASS] 4b thu 100đ qua recordDebtPayment: đơn paymentStatus phải paid — pay={"ok":true,"error":null,"remaining":0}, order={"id":1,"orderCode":"DH20261109-1567","customerName":"Khách Thử","customerPhone":"","customerAddress":"","status":"confirmed","totalAmount":100,"note":"","stockDeducted":1,"depositAmount":100,"paymentStatus":"paid","deliveryPerson":"","deliveryFee":0,"expectedDelivery":"","reservedUntil":"","createdAt":"2026-11-09T10:11:49.835Z","updatedAt":"2026-11-09T10:11:49.839Z","items":[{"id":1,"orderId":1,"productId":1,"productSku":"BC-0959","productName":"SP Thử","quantity":1,"unitPrice":100,"lineTotal":100,"returnedQty":0,"costPrice":50}]}
+  [PASS] 5a App() có 2 lần early return (chưa đăng nhập / đổi PIN) — first=103427, second=103762
+  [PASS] 5b mọi hook của App() đều nằm TRƯỚC lần early return đầu tiên — 36 hook đều trước early return
+  [PASS] 5c các useQuery dữ liệu có enabled: !!staff && !needPinChange — đủ enabled cho 7 query
+  [PASS] R1a xuất quá tồn phải lỗi, tồn không đổi (5) — stock=5
+  [PASS] R1b đơn xác nhận vượt tồn phải lỗi, tồn không đổi (5) — stock=5
+  [PASS] R2a hủy đơn chưa trả: tồn 5 -> 3 -> 5 — 3? 3 -> 5
+  [PASS] R2b hủy lần 2 không hoàn trùng (vẫn 5) — stock=5
+  [PASS] R3a gửi trùng requestKey phiếu nhập: chỉ 1 phiếu, cùng refCode — ref1=PN20261109-5027 ref2=PN20261109-5027 movs 3->4
+  [PASS] R3b gửi trùng requestKey tạo đơn: chỉ 1 đơn, cùng orderCode — code1=DH20261109-1525 code2=DH20261109-1525 orders 1->2
+
+=== TỔNG KẾT ===
+1 — Vượt quyền (requireAuth + ma trận phân quyền + chống dò PIN): 15/15 PASS
+2 — Kiểm kê chốt theo delta (không mất hàng nhập/xuất xen giữa): 6/6 PASS
+3 — Trả hàng / hủy đơn không cộng thừa: 7/7 PASS
+4 — Công nợ khi hủy đơn / thu nợ: 5/5 PASS
+5 — Hooks sau early return ở màn hình đăng nhập (kiểm tra tĩnh App.tsx): 3/3 PASS
+Hồi quy — tồn không âm, hủy 2 lần, chống gửi trùng: 6/6 PASS
+TỔNG: 42 PASS, 0 FAIL
+KẾT LUẬN: TẤT CẢ ĐỀU PASS.

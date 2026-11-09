@@ -1,5 +1,108 @@
 # CHANGES.md — Nhật ký thay đổi (bản nâng cấp 2026-11-09)
 
+## Sửa 5 lỗi (ngày 2026-11-09) — xem `TEST_RESULTS.md` để biết kết quả kiểm thử
+
+Harness tái hiện: `tests/repro-5-bugs.ts` (`bun tests/repro-5-bugs.ts`, Bun + SQLite trong bộ nhớ,
+không nhúng vào bundle app). Trước sửa: **21 PASS / 20 FAIL** (cả 5 nhóm đều FAIL, log ở
+`tests/repro-before-fix.log`); sau sửa: **42 PASS / 0 FAIL** (log ở `tests/repro-after-fix.log`).
+Kiểm chứng phụ thêm 36 mục (`tests/verify-extra.log`): migration 0001→0004, đổi PIN, hủy đơn với
+sản phẩm ngưng bán, nhập CSV, ma trận phân quyền đầy đủ, action đọc không token.
+
+### Lỗi 1 — Vượt quyền (gốc: `resolveActor` trả null khi không có token, `requireRole(null, …)` cho qua; nhiều action không kiểm tra quyền)
+- Thêm `requireAuth(db, token)`: thiếu/trống token → lỗi `Cần đăng nhập để thực hiện thao tác này.`;
+  token sai/hết hạn/tài khoản bị vô hiệu → lỗi `Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.`
+- Mọi action trừ `loginStaff` đều gọi `requireAuth` đầu tiên (kể cả action đọc), rồi kiểm tra vai trò
+  server-side theo ma trận dưới đây. Client truyền `actorToken` trong mọi lời gọi `api.*`
+  (đã vá các chỗ thiếu: `ordersQ`/`suppliersQ`/`categoriesQ`, `deleteSupplier`/`deleteCategory`,
+  `createCategory`, `listPriceHistory`, `listDebts`, `listStocktakes`, `listAuditLogs`,
+  `listReports`/`getReports`, `getPendingRestocks`, `SupplierForm`).
+- Chống dò PIN: thêm cột `failed_attempts`/`locked_until` cho bảng `staff` (migration 0004);
+  5 lần sai liên tiếp thì khóa đăng nhập 15 phút (đăng nhập chỉ dùng PIN nên lần sai được đếm
+  chung cho mọi tài khoản đang hoạt động; đăng nhập đúng reset bộ đếm). Hết hạn khóa thì đếm lại từ đầu.
+- `ensureAdminSeed` giữ nguyên (chỉ tạo admin mặc định khi bảng staff trống); tạo nhân viên sau đó
+  vẫn phải qua admin đã đăng nhập. Đã bỏ hết ghi chú "tương thích cũ" cho phép không đăng nhập.
+- `changePin` giữ nguyên dùng `token` (bản thân token là chứng thực) và vẫn yêu cầu phiên hợp lệ.
+
+#### Ma trận phân quyền (duy nhất, áp dụng server-side)
+| Nhóm | Action |
+|---|---|
+| Chỉ admin | `createStaff`, `setStaffActive`, `listStaff`, `deleteProduct`, đổi giá (`updateProduct` khi đổi giá), `reconcileStock` khi `apply=true`, `restoreBackup`, `exportBackup`, `deleteCategory` |
+| Admin + thủ kho | `createProduct`, `updateProduct` (không đổi giá), `createMovement`, `createMovementBatch`, `deleteMovement`, kiểm kê (`createStocktake`/`saveStocktakeItem`/`closeStocktake`), `importProductsCsv`, `createSupplier`/`updateSupplier`/`deleteSupplier`, `createCategory`, `createBackupSnapshot`, `resolvePendingRestock` |
+| Admin + thủ kho + sales | `createOrder`, `updateOrderStatus`, `createReturn`, `recordDeposit`, `recordDebtPayment`, `releaseReservation` |
+| Mọi tài khoản đã đăng nhập (chỉ đọc) | `getDashboard`, `listProducts`, `listMovements`, `listOrders`, `listSuppliers`, `listCategories`, `listDebts`, `listAuditLogs`, `listBackups`, `listStocktakes`, `listPriceHistory`, `getPendingRestocks`, `getReports`, `reconcileStock` khi `apply=false` |
+| Không cần đăng nhập | Chỉ `loginStaff` |
+
+Sales tuyệt đối không được: phiếu nhập/xuất trực tiếp, xóa phiếu, xóa sản phẩm, đổi giá,
+quản lý nhân viên, khôi phục backup, đối chiếu tồn (apply). `changePin` cần phiên đăng nhập hợp lệ.
+
+### Lỗi 2 — Kiểm kê làm mất hàng trên sổ (gốc: `closeStocktake` áp số đếm tuyệt đối, bỏ qua nhập/xuất giữa lúc đếm và lúc chốt)
+- Khi chốt, mỗi dòng `diff != 0` áp delta lúc đếm (`diffQty = đếm − sổ lúc đếm`) vào tồn hiện tại lúc chốt:
+  `after = currentStock + diffQty`, phiếu điều chỉnh ghi `quantity = |diffQty|`,
+  `beforeStock = tồn lúc chốt`, `afterStock = after`. VD: sổ lúc đếm 4, đếm 9 (diff +5),
+  nhập thêm 5 (tồn 9) → chốt ghi tồn **14** (trước sửa: 9).
+- Diffs trả về tính lại theo tồn hiện tại lúc chốt (`systemQty` = tồn lúc chốt,
+  `diff` = đếm − tồn lúc chốt), kèm thêm `systemQtyAtCount`, `systemQtyAtClose`, `appliedDiff`;
+  ghi chú phiếu + audit log ghi đủ 3 số (đếm, sổ lúc đếm, sổ lúc chốt). Bỏ qua dòng `diff = 0`.
+  Giao diện tab Kiểm kê hiển thị cả 3 số + số điều chỉnh đã áp.
+- Giữ nguyên lỗi khi sản phẩm đã xóa/ngưng kinh doanh; thêm chặn khi tồn sau điều chỉnh sẽ âm.
+
+### Lỗi 3 — Trả hàng rồi hủy đơn cộng thừa; trả lần 2 sau trả một phần bị chặn
+- Gốc A: nhánh hủy cộng lại toàn bộ `it.quantity`, bỏ qua `it.returnedQty`.
+  Sửa: khi hủy, mỗi dòng chỉ hoàn lại net = `quantity − returnedQty` (cả tồn kho và
+  `pendingRestocks` đều dùng số net; net = 0 thì không sinh phiếu cho dòng đó).
+  VD: tồn 10 → bán 2 (còn 8) → trả 1 (còn 9) → hủy đơn: tồn **10** (trước sửa: 11).
+- Gốc B: `createReturn` chỉ cho `["confirmed","delivering","completed"]` nên đơn
+  `partially_returned` không trả tiếp được. Sửa: cho phép thêm `"partially_returned"`.
+  Vẫn chặn trả khi đơn đã `"cancelled"` hoặc `"returned"`.
+
+### Lỗi 4 — Công nợ sai trạng thái
+- Gốc A: hủy đơn không đụng tới bảng `debts`. Sửa: khi hủy đơn (cả `updateOrderStatus` →
+  `cancelled` và `releaseReservation`), void công nợ phải thu gắn với đơn (`refCode` = orderCode):
+  `remaining` về 0, trạng thái `"cancelled"`, ghi chú thêm `Đã hủy đơn — công nợ đã xóa`,
+  ghi audit (`void_debt_on_cancel`). Đã thu một phần trước khi hủy: giữ `paidAmount` làm lịch sử,
+  đặt `totalAmount = paidAmount`. Công nợ đã thu đủ (`paid`) giữ nguyên để xử lý hoàn tiền thủ công.
+  `debts.status` trong `0003` là cột TEXT thường (không có CHECK constraint enum) nên không cần
+  rebuild bảng — migration 0004 chỉ ghi chú việc này, enum mở rộng ở `schema.ts`.
+  `createReceivableDebtIfNeeded` bỏ qua công nợ đã `"cancelled"` để đơn hủy rồi xác nhận lại
+  vẫn sinh công nợ mới. `isOverdueDebt` không tính công nợ đã hủy là quá hạn; tab Công nợ
+  hiển thị nhãn `Đã hủy` và ẩn nút ghi thanh toán cho công nợ đã hủy.
+- Gốc B: `recordDebtPayment` chỉ cập nhật bảng `debts`, không đồng bộ đơn hàng.
+  Sửa: thêm helper chung `syncOrderPaymentFromDebt(db, orderCode, amountJustCollected, debtRemainingAfter)`:
+  sau mỗi `recordDebtPayment` (chỉ với công nợ phải thu gắn đơn) và sau `createReturn` khi
+  công nợ về 0: `depositAmount += số tiền vừa thu` (không vượt `totalAmount`);
+  `paymentStatus = paid` khi công nợ còn 0, `partial` khi đã cọc > 0, `unpaid` khi chưa cọc.
+  `recordDeposit` giữ nguyên luồng đồng bộ sẵn có.
+
+### Lỗi 5 — Hooks sau nhánh return ở màn hình đăng nhập (gốc: `App()` gọi `useQuery`/`useMemo`/`useMutation` sau 2 lần early return)
+- Chuyển toàn bộ hook của `App()` lên trước cả 2 lần early return (`!staff` → `LoginScreen`,
+  `needPinChange` → `ChangePinScreen`); 7 `useQuery` dữ liệu thêm `enabled: !!staff && !needPinChange`.
+  2 lần return có điều kiện giữ nguyên sau tất cả hook.
+- Rà soát toàn bộ component trong `App.tsx`: các component khác (`ProductForm`, `MovementForm`,
+  `OrderForm`, `LoginScreen`, `ChangePinScreen`, `AdminTab`, …) đều gọi hook trước mọi return —
+  không còn chỗ nào vi phạm (kể cả `PendingRestockBox`: `return null` nằm sau mọi hook).
+
+### File đổi / thêm trong đợt sửa 5 lỗi
+- `server/src/actions.ts` — `requireAuth` + ma trận phân quyền cho 44 action, `closeStocktake` theo delta,
+  hủy đơn theo net, `createReturn` cho `partially_returned`, `voidReceivableDebtForOrder`,
+  `syncOrderPaymentFromDebt`, chống dò PIN ở `loginStaff`.
+- `server/src/schema.ts` — `staff.failedAttempts`/`lockedUntil`, `debts.status` thêm `"cancelled"`.
+- `drizzle/0004_auth_and_debt_status.sql` (mới) + `drizzle/meta/_journal.json` (thêm entry idx 3).
+- `client/src/App.tsx` — hook `App()` lên trước early return + `enabled`, `actorToken` cho mọi lời gọi
+  `api.*`, nhãn `Đã hủy` cho công nợ, hiển thị chi tiết chênh lệch kiểm kê lúc chốt.
+- `tests/repro-5-bugs.ts` (mới), `tests/repro-before-fix.log`, `tests/repro-after-fix.log`,
+  `tests/verify-extra.log` — harness + log kiểm chứng.
+- `README.md`, `TESTING.md`, `TEST_RESULTS.md` (mới) — cập nhật quy tắc đăng nhập/kiểm kê/công nợ.
+
+### Những gì chưa kiểm thử được trong đợt này
+- Chưa chạy end-to-end trên trình duyệt thật / Muse runtime (đăng nhập, tab, in phiếu, mất mạng thật,
+  2 máy cùng lúc, đếm hàng thật tại cửa hàng). Xem `TEST_RESULTS.md` — các mục này ghi
+  `Chưa chạy được`, không ghi `Đạt`.
+- Chống dò PIN khóa chung mọi tài khoản sau 5 lần sai (do đăng nhập chỉ dùng PIN, không có tên
+  đăng nhập để phân biệt ai đang dò). Với cửa hàng gia đình thì chấp nhận được; nếu cần khóa
+  theo từng người thì phải thêm tên đăng nhập vào luồng đăng nhập.
+
+## Bản nâng cấp 2026-11-09 (5 bước — nội dung gốc, xem thêm mục sửa 5 lỗi ở trên)
+
 Triển khai theo 5 bước: (1) số tồn luôn đúng, (2) bảo vệ dữ liệu, (3) hoàn thiện quy trình bán hàng, (4) công cụ hằng ngày, (5) chuẩn bị kiểm thử. Repo đích: `GensAI83/quan-ly-kho-thiet-bi-ve-sinh` (chưa đẩy lên GitHub trong đợt này).
 
 ## File đổi / thêm
@@ -58,10 +161,10 @@ Triển khai theo 5 bước: (1) số tồn luôn đúng, (2) bảo vệ dữ li
 2. **SQLite không cho `ALTER TABLE ADD COLUMN ... UNIQUE`** nên `request_key` thêm dạng cột thường + `CREATE UNIQUE INDEX` riêng (nhiều NULL vẫn được phép, trùng key vẫn bị chặn — đã kiểm chứng).
 3. Yêu cầu nói “12 bảng mới” nhưng chỉ liệt kê 11 tên — đã tạo đủ 11 bảng đó.
 4. **Công nợ khi tạo đơn:** tạo debt phải thu khi còn dư `tổng − cọc > 0` (kể cả khi đã cọc một phần), thay vì chỉ khi chưa cọc — vì nếu chỉ tạo khi chưa cọc thì `recordDeposit` không bao giờ có công nợ để trừ khi khách đã cọc một phần.
-5. **Hủy đơn không tự đóng/xóa debt phải thu** của đơn đó (yêu cầu không nói rõ) — công nợ còn lại phải xử lý thủ công qua tab Công nợ hoặc trả hàng.
+5. **Hủy đơn không tự đóng/xóa debt phải thu** của đơn đó (yêu cầu không nói rõ) — công nợ còn lại phải xử lý thủ công qua tab Công nợ hoặc trả hàng. *(Đã thay đổi ngày 2026-11-09 — xem mục "Sửa 5 lỗi", lỗi 4: hủy đơn nay void công nợ phải thu của đơn.)*
 6. **Không có action tạo công nợ phải trả cho nhà cung cấp** (yêu cầu không yêu cầu) — debt loại `payable` hiện chỉ xuất hiện qua khôi phục backup.
-7. **Đổi giá khi không có token:** server vẫn cho phép (tương thích client cũ chưa đăng nhập), nhưng app luôn bắt đăng nhập nên tài khoản non-admin bị chặn cả ở client lẫn server. `createProduct` không chặn giá theo vai trò (giá ban đầu khi tạo mới).
-8. **`closeStocktake` chốt tồn về `countedQty` theo tồn hiện tại**, vì `systemQty` lưu lúc đếm có thể đã cũ nếu có người nhập/xuất xen vào.
+7. **Đổi giá khi không có token:** server vẫn cho phép (tương thích client cũ chưa đăng nhập), nhưng app luôn bắt đăng nhập nên tài khoản non-admin bị chặn cả ở client lẫn server. `createProduct` không chặn giá theo vai trò (giá ban đầu khi tạo mới). *(Đã thay đổi ngày 2026-11-09 — xem mục "Sửa 5 lỗi", lỗi 1: mọi action đều yêu cầu đăng nhập, đổi giá chỉ admin.)*
+8. **`closeStocktake` chốt tồn về `countedQty` theo tồn hiện tại**, vì `systemQty` lưu lúc đếm có thể đã cũ nếu có người nhập/xuất xen vào. *(Đã thay đổi ngày 2026-11-09 — xem mục "Sửa 5 lỗi", lỗi 2: chốt theo delta, không ghi đè số đếm tuyệt đối.)*
 9. **`createMovementBatch` chỉ nhận nhập/xuất** (`in`/`out`), không nhận kiểm kê — chế độ nhiều mặt hàng ở client chỉ bật cho nhập/xuất.
 
 ## Kết quả kiểm chứng (chạy ngày 2026-11-09)
@@ -77,7 +180,7 @@ Triển khai theo 5 bước: (1) số tồn luôn đúng, (2) bảo vệ dữ li
 - **Chưa kiểm thử end-to-end trên server thật / trình duyệt.** Chỉ mới typecheck + build + migration test; logic saga/idempotency/audit/khôi phục chưa được chạy thử với dữ liệu thật. Cần chạy theo `TESTING.md` trước khi dùng cho cửa hàng thật.
 - **Offline thật sự chưa có.** App cần mạng để chạy; mất mạng thì báo rõ và không ghi trùng khi bấm lại (nhờ idempotency key), nhưng không có hàng đợi ghi offline hay đồng bộ sau khi có mạng.
 - **Không có cron sao lưu trên server.** Sao lưu tự động chỉ chạy khi mở app (phiên mở app); nhiều ngày không mở app thì không có snapshot mới.
-- **Xác thực PIN chỉ ở mức cửa hàng nhỏ.** PIN 4–8 số + SHA-256/salt, token lưu `sessionStorage`, không có chống brute-force (khóa sau nhiều lần sai), không có 2FA, không mã hóa dữ liệu. Đủ cho cửa hàng gia đình, không đủ cho hệ thống nhiều chi nhánh.
+- **Xác thực PIN chỉ ở mức cửa hàng nhỏ.** PIN 4–8 số + SHA-256/salt, token lưu `sessionStorage`, không có 2FA, không mã hóa dữ liệu. Từ 2026-11-09 có chống dò PIN đơn giản: 5 lần sai liên tiếp khóa đăng nhập 15 phút (khóa chung mọi tài khoản, xem mục "Sửa 5 lỗi", lỗi 1). Đủ cho cửa hàng gia đình, không đủ cho hệ thống nhiều chi nhánh.
 - **Không có phân quyền ở mức từng kho/chi nhánh** và không có log chống sửa/xóa nhật ký audit (admin xem được toàn bộ).
 - **Giá vốn dùng giá nhập hiện tại** tại thời điểm bán (không tính FIFO theo từng lô nhập); báo cáo lãi gộp vì vậy là ước tính theo giá vốn hiện hành, không phải lãi theo từng lô hàng cụ thể.
 - **Đồng thời thật sự (race) vẫn dựa vào version-check**, không có khóa hàng (row lock) vì SQLite + SDK không hỗ trợ; hai người xuất cùng 1 mặt hàng đến giới hạn tồn: người sau sẽ nhận lỗi version/tồn và phải tải lại — đúng theo thiết kế, nhưng cần thử theo `TESTING.md` mục 4.

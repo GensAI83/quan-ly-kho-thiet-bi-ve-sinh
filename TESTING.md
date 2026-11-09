@@ -1,5 +1,9 @@
 # TESTING.md — Checklist chạy thử tại cửa hàng
 
+> Kết quả chạy thử bằng code/harness ngày 2026-11-09 xem ở **`TEST_RESULTS.md`**.
+> Các mục cần đếm hàng thật, trình duyệt thật hoặc Muse runtime thì ghi rõ
+> "Chưa chạy được" trong file đó — chưa chạy thử tại cửa hàng thật.
+
 Chạy thử trước khi dùng app cho bán hàng thật. Chuẩn bị: đăng nhập bằng tài khoản quản trị (PIN mặc định `123456`, đổi PIN ngay lần đầu), thêm 2–3 sản phẩm thử (tồn nhỏ, ví dụ 10 cái), 1 nhà cung cấp thử. Ghi lại kết quả từng mục: Đạt / Không đạt + ghi chú.
 
 ## 0. Chuẩn bị nhanh

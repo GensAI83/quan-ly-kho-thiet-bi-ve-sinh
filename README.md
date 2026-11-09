@@ -9,8 +9,8 @@ App quản lý kho thiết bị vệ sinh — nhập/xuất kho, tồn kho, lị
 - **Nhập / Xuất kho:** phiếu nhập (PN), phiếu xuất (PX) và kiểm kê — cả phiếu 1 mặt hàng và phiếu nhiều mặt hàng (1 mã phiếu chung), tự động cập nhật tồn, chặn xuất quá tồn, xóa phiếu hoàn tồn; chống lệch tồn khi nhiều người cùng thao tác (kiểm tra phiên bản tồn + mã chống gửi trùng)
 - **Lịch sử nhập/xuất:** mã phiếu, lý do, đối tác, tồn trước → sau, người thao tác
 - **Đơn hàng:** nhiều dòng hàng, giữ hàng (có hạn giữ), xác nhận đơn tự trừ kho và sinh phiếu xuất, giao hàng, hoàn thành, hủy đơn tự hoàn kho, trả hàng (toàn phần / một phần), tiền cọc và trạng thái thanh toán
-- **Kiểm kê theo đợt:** tạo đợt, nhập số đếm thực tế nhiều sản phẩm (lưu nháp), chốt đợt sinh phiếu điều chỉnh; đối chiếu tồn kho từ sổ phiếu
-- **Công nợ:** phải thu (bán chịu) / phải trả, ghi thanh toán, cảnh báo quá hạn
+- **Kiểm kê theo đợt:** tạo đợt, nhập số đếm thực tế nhiều sản phẩm (lưu nháp), chốt đợt sinh phiếu điều chỉnh; đối chiếu tồn kho từ sổ phiếu. Khi chốt, chênh lệch lúc đếm được cộng vào tồn hiện tại lúc chốt (không ghi đè số đếm tuyệt đối) nên hàng nhập/xuất xen giữa lúc đếm và lúc chốt không bị mất trên sổ.
+- **Công nợ:** phải thu (bán chịu) / phải trả, ghi thanh toán, cảnh báo quá hạn. Hủy đơn sẽ xóa (void) công nợ phải thu của đơn đó (còn lại về 0, trạng thái "Đã hủy"); thu đủ nợ ở tab Công nợ thì đơn tự chuyển sang "Đã thanh toán đủ".
 - **Báo cáo:** doanh thu theo ngày, top sản phẩm bán chạy, hàng sắp hết, lãi gộp (doanh thu − giá vốn), tổng hợp công nợ
 - **Nhân viên & phân quyền:** đăng nhập bằng mã PIN, 3 vai trò (quản trị / thủ kho / nhân viên bán hàng), lịch sử thao tác (ai làm gì, khi nào)
 - **Sao lưu & khôi phục:** sao lưu ngay (tải file JSON), tự động sao lưu khi mở app nếu bản mới nhất quá 24 giờ, khôi phục từ snapshot (chỉ quản trị, xác nhận 2 lần)
@@ -22,7 +22,8 @@ App quản lý kho thiết bị vệ sinh — nhập/xuất kho, tồn kho, lị
 - Tài khoản quản trị đầu tiên được tạo tự động khi đăng nhập lần đầu: tên **“Chủ cửa hàng”**, mã PIN mặc định **123456**.
 - Ở lần đăng nhập đầu tiên, app **bắt buộc đổi PIN** trước khi vào làm việc. Hãy đổi ngay thành PIN riêng (4–8 chữ số) và đừng chia sẻ PIN quản trị cho nhân viên bán hàng.
 - Mã PIN chỉ lưu dạng băm SHA-256 + salt, không lưu PIN gốc. Tài khoản quản trị tạo thêm nhân viên (tên, vai trò, PIN) trong tab **Nhân viên & Sao lưu**.
-- Phân quyền: chỉ quản trị được xóa sản phẩm/danh mục, đổi giá bán/nhập, khôi phục sao lưu, quản lý nhân viên; thủ kho được nhập/xuất/kiểm kê; nhân viên bán hàng được tạo đơn/giữ hàng/giao hàng/trả hàng nhưng không được sửa tồn trực tiếp.
+- **Mọi thao tác trong app đều yêu cầu đăng nhập** (kể cả xem dữ liệu): thiếu token thì máy chủ báo "Cần đăng nhập để thực hiện thao tác này.", token hết hạn thì báo "Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.". Nhập sai mã PIN 5 lần liên tiếp sẽ khóa đăng nhập 15 phút.
+- Phân quyền (máy chủ kiểm tra, xem ma trận đầy đủ trong `CHANGES.md`): chỉ quản trị được xóa sản phẩm/danh mục, đổi giá bán/nhập, khôi phục/xuất sao lưu, quản lý nhân viên, chốt đối chiếu tồn; thủ kho được nhập/xuất/kiểm kê, quản lý nhà cung cấp, nhập CSV; nhân viên bán hàng được tạo đơn/giữ hàng/giao hàng/trả hàng/cọc/thu nợ nhưng không được sửa tồn trực tiếp, xóa phiếu, xóa sản phẩm hay đổi giá.
 
 ## Sao lưu & khôi phục
 
@@ -43,10 +44,12 @@ App quản lý kho thiết bị vệ sinh — nhập/xuất kho, tồn kho, lị
 bun install   # lưu ý: trong môi trường này có thể lỗi integrity check với @hatch/space-sdk (xem CHANGES.md)
 bun run typecheck
 bun run build:server
+bun tests/repro-5-bugs.ts   # harness tái hiện 5 lỗi đã sửa (Bun + SQLite trong bộ nhớ, không cần trình duyệt)
 ```
 
 - `bun run typecheck`: kiểm tra kiểu cả client và server (đã về 0 lỗi ngày 2026-11-09).
 - `bun run build:server`: đóng gói server thành `server/dist/actions.js`.
+- `bun tests/repro-5-bugs.ts`: 42 kiểm thử (5 nhóm lỗi + hồi quy: tồn không âm, hủy 2 lần, chống gửi trùng) — đều PASS ngày 2026-11-09, xem `TEST_RESULTS.md`.
 - `bun run build:client` (lệnh `bun ./client/build.mjs`) bị SDK chặn có chủ đích khi build tay — thông báo “This web artifact cannot be built by hand… call the `artifact.edit` tool”. Đây không phải lỗi code: artifact sẽ được build/publish lại bằng công cụ artifact khi triển khai. Kiểm tra nhanh bundle client có thể dùng `bun build ./client/src/main.tsx --outdir=/tmp/smoke-out` (chỉ để kiểm tra, cảnh báo `@utility`/`@theme` của Tailwind khi build không qua plugin là bình thường).
 
 ## Ghi chú

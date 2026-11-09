@@ -1,0 +1,62 @@
+=== HARNESS TÁI HIỆN 5 LỖI — quản lý kho thiết bị vệ sinh ===
+Ngày chạy: 2026-11-09T10:05:41.542Z
+  (lưu ý) migration 0004_auth_and_debt_status.sql chưa có — bỏ qua
+  [FAIL] 1a createStaff admin KHÔNG token phải lỗi — {"ok":true,"id":4,"error":null}
+  [FAIL] 1b sales tạo phiếu xuất phải lỗi — {"ok":true,"error":null,"newStock":9,"refCode":"PX20261109-9245","version":1}
+  [FAIL] 1c không token tạo phiếu xuất phải lỗi — {"ok":true,"error":null,"newStock":8,"refCode":"PX20261109-3258","version":2}
+  [PASS] 1d-1 admin nhập kho được — {"ok":true,"error":null,"newStock":9,"refCode":"PN20261109-1153","version":3}
+  [PASS] 1d-2 thủ kho xuất kho được — {"ok":true,"error":null,"newStock":8,"refCode":"PX20261109-3503","version":4}
+  [PASS] 1d-3 sales tạo đơn được — {"ok":true,"error":null,"orderCode":"DH20261109-1232","id":1}
+  [FAIL] 1d-4 sales xóa sản phẩm phải lỗi — {"ok":false,"error":"Sản phẩm còn tồn 8 cái, không thể xoá. Hãy xuất hết tồn trước, hoặc ngưng kinh doanh sau khi hết tồn.","discontinued":false}
+  [PASS] 1d-5 sales đổi giá phải lỗi — {"ok":false,"error":"Chỉ quản trị viên được đổi giá."}
+  [PASS] 1d-6 sales xem danh sách nhân viên phải lỗi — {"staff":[],"error":"Chỉ quản trị viên được xem danh sách nhân viên."}
+  [FAIL] 1d-6b không token xem danh sách nhân viên phải lỗi — {"staff":[{"id":1,"name":"Chủ cửa hàng","role":"admin","active":1,"mustChangePin":1},{"id":2,"name":"Thủ kho A","role":"storekeeper","active":1,"mustChangePin":0},{"id":3,"name":"Bán hàng B","role":"sales","active":1,"mustChangePin":0},{"id":4,"name":"Kẻ lạ","role":"admin","active":1,"mustChangePin":0}],"error":null}
+  [FAIL] 1e token sai gọi getDashboard phải lỗi hết hạn — {"totalSkus":1,"totalUnits":8,"inventoryValueCost":400,"inventoryValueSell":800,"lowStockCount":0,"outOfStockCount":0,"todayInQty":11,"todayOutQty":3,"todayInValue":550,"todayOutValue":300,"pendingOrders":1,"totalOrders":1,"reservedOrders":0,"pendingRestockCount":0,"overdueDebtTotal":0,"lowStockProducts":[],"recentMovements":[{"id":5,"productId":1,"productSku":"BC-1203","productName":"SP Thử","type":"out","quantity":1,"beforeStock":9,"afterStock":8,"unitCost":100,"reason":"Xuất","refCode":"PX20261109-3503","partner":"","note":"","requestKey":"","actor":"Thủ kho A","createdAt":"2026-11-09T10:05:41.616Z"},{"id":4,"productId":1,"productSku":"BC-1203","productName":"SP Thử","type":"in","quantity":1,"beforeStock":8,"afterStock":9,"unitCost":50,"reason":"Nhập","refCode":"PN20261109-1153","partner":"","note":"","requestKey":"","actor":"Chủ cửa hàng","createdAt":"2026-11-09T10:05:41.613Z"},{"id":3,"productId":1,"productSku":"BC-1203","productName":"SP Thử","type":"out","quantity":1,"beforeStock":9,"afterStock":8,"unitCost":100,"reason":"Xuất bán","refCode":"PX20261109-3258","partner":"","note":"","requestKey":"","actor":"Hệ thống (chưa đăng nhập)","createdAt":"2026-11-09T10:05:41.610Z"},{"id":2,"productId":1,"productSku":"BC-1203","productName":"SP Thử","type":"out","quantity":1,"beforeStock":10,"afterStock":9,"unitCost":100,"reason":"Xuất bán","refCode":"PX20261109-9245","partner":"","note":"","requestKey":"","actor":"Bán hàng B","createdAt":"2026-11-09T10:05:41.601Z"},{"id":1,"productId":1,"productSku":"BC-1203","productName":"SP Thử","type":"in","quantity":10,"beforeStock":0,"afterStock":10,"unitCost":50,"reason":"Tồn đầu kỳ","refCode":"PN20261109-9122","partner":"","note":"Nhập tồn khi tạo sản phẩm","requestKey":"","actor":"Chủ cửa hàng","createdAt":"2026-11-09T10:05:41.593Z"}],"chart7Days":[{"date":"2026-11-03T00:00:00.000Z","label":"03/11","inQty":0,"outQty":0},{"date":"2026-11-04T00:00:00.000Z","label":"04/11","inQty":0,"outQty":0},{"date":"2026-11-05T00:00:00.000Z","label":"05/11","inQty":0,"outQty":0},{"date":"2026-11-06T00:00:00.000Z","label":"06/11","inQty":0,"outQty":0},{"date":"2026-11-07T00:00:00.000Z","label":"07/11","inQty":0,"outQty":0},{"date":"2026-11-08T00:00:00.000Z","label":"08/11","inQty":0,"outQty":0},{"date":"2026-11-09T00:00:00.000Z","label":"09/11","inQty":11,"outQty":3}]}
+  [FAIL] 1f không token đọc danh sách sản phẩm phải lỗi — {"products":[{"id":1,"sku":"BC-1203","name":"SP Thử","category":"Bồn cầu","brand":"","unit":"cái","costPrice":50,"sellPrice":100,"currentStock":8,"minStock":1,"location":"","notes":"","version":4,"status":"active","reservedQty":0,"createdAt":"2026-11-09T10:05:41.582Z","updatedAt":"2026-11-09T10:05:41.615Z"}],"categories":["Bình nóng lạnh","Bồn cầu","Bồn tắm","Gương & Tủ lavabo","Khác","Lavabo & Chậu rửa","Phụ kiện phòng tắm","Sen tắm & Vòi sen","Vòi lavabo","Xả & Phụ kiện bồn cầu"]}
+  [FAIL] 1g không token tạo đơn phải lỗi — {"ok":true,"error":null,"orderCode":"DH20261109-7176","id":2}
+  (lưu ý) migration 0004_auth_and_debt_status.sql chưa có — bỏ qua
+  [PASS] 1h-0 đăng nhập đúng PIN bán hàng được (trước khi dò) — {"ok":true,"token":"06e8a95de2433bb922295f32fe43d880d143c9b890e08b20","error":null,"staff":{"id":3,"name":"Bán hàng B","role":"sales","mustChangePin":0}}
+  [FAIL] 1h-2 sau 5 lần sai, đăng nhập đúng PIN phải bị khóa — {"ok":true,"token":"f2455f474b29176f7a02ace9100e891c7cbe366c91d5dd8a","error":null,"staff":{"id":3,"name":"Bán hàng B","role":"sales","mustChangePin":0}}
+  (lưu ý) migration 0004_auth_and_debt_status.sql chưa có — bỏ qua
+  [PASS] 2a tạo đợt kiểm kê — {"ok":true,"id":1,"code":"KK20261109-2834","error":null}
+  [PASS] 2b lưu số đếm 9 khi sổ là 4 (diff +5) — {"ok":true,"error":null}
+  [PASS] 2c nhập thêm 5 giữa lúc đếm và chốt (tồn phải là 9) — stock=9
+  [FAIL] 2d chốt kiểm kê: tồn phải là 14 (4 + diff 5 + nhập 5) — stock=9, close={"ok":true,"error":null,"diffs":[{"productSku":"BC-1113","productName":"SP Thử","systemQty":4,"countedQty":9,"diff":5}]}
+  [FAIL] 2e phiếu điều chỉnh ghi before 9 -> after 14, số lượng 5 — [{"id":3,"productId":1,"productSku":"BC-1113","productName":"SP Thử","type":"adjust","quantity":5,"beforeStock":4,"afterStock":9,"unitCost":50,"reason":"Kiểm kê KK20261109-2834","refCode":"KK20261109-2834","partner":"","note":"Kiểm kê KK20261109-2834","requestKey":null,"actor":"Thủ kho A","createdAt":"2026-11-09T10:05:41.713Z"}]
+  [FAIL] 2f diffs trả về tính theo tồn lúc chốt (systemQty 9, đếm 9) — [{"productSku":"BC-1113","productName":"SP Thử","systemQty":4,"countedQty":9,"diff":5}]
+  (lưu ý) migration 0004_auth_and_debt_status.sql chưa có — bỏ qua
+  [PASS] 3i-a xác nhận đơn bán 2 (tồn 8) — stock=8
+  [PASS] 3i-b trả 1 (tồn 9, partially_returned) — stock=9, ret={"ok":true,"error":null,"refCode":"DH20261109-3526","newStatus":"partially_returned"}
+  [FAIL] 3i-c trả tiếp 1 nữa phải ĐƯỢC (trước sửa: bị chặn) — stock=9, ret={"ok":false,"error":"Chỉ trả hàng được khi đơn đang ở trạng thái đã xác nhận, đang giao hoặc hoàn thành.","refCode":"","newStatus":"partially_returned"}
+  [FAIL] 3i-d trả hết 2 rồi hủy đơn: tồn phải là 10 — stock=11, cancel={"ok":true,"error":null,"pendingRestocks":[]}
+  (lưu ý) migration 0004_auth_and_debt_status.sql chưa có — bỏ qua
+  [PASS] 3ii-a trả 1 (tồn 9) — stock=9
+  [FAIL] 3ii-b trả 1 rồi hủy đơn: tồn phải là 10 (trước sửa: 11) — stock=11, cancel={"ok":true,"error":null,"pendingRestocks":[]}
+  (lưu ý) migration 0004_auth_and_debt_status.sql chưa có — bỏ qua
+  [PASS] 4a-a xác nhận đơn sinh công nợ 100 còn dư — {"id":1,"partnerName":"Khách Thử","partnerType":"customer","kind":"receivable","totalAmount":100,"paidAmount":0,"remaining":100,"dueDate":"","refCode":"DH20261109-3686","note":"Công nợ đơn DH20261109-3686","status":"open","createdAt":"2026-11-09T10:05:41.777Z"}
+  [FAIL] 4a-b hủy đơn: công nợ còn lại 0 và trạng thái cancelled — {"id":1,"partnerName":"Khách Thử","partnerType":"customer","kind":"receivable","totalAmount":100,"paidAmount":0,"remaining":100,"dueDate":"","refCode":"DH20261109-3686","note":"Công nợ đơn DH20261109-3686","status":"open","createdAt":"2026-11-09T10:05:41.777Z"}
+  (lưu ý) migration 0004_auth_and_debt_status.sql chưa có — bỏ qua
+  [PASS] 4a2-a cọc 40 trước khi hủy — {"ok":true,"error":null,"depositAmount":40,"paymentStatus":"partial"}
+  [FAIL] 4a2-b hủy sau khi đã thu 40: total=40, paid=40, còn 0, cancelled — {"id":1,"partnerName":"Khách Thử","partnerType":"customer","kind":"receivable","totalAmount":100,"paidAmount":40,"remaining":60,"dueDate":"","refCode":"DH20261109-5577","note":"Công nợ đơn DH20261109-5577","status":"open","createdAt":"2026-11-09T10:05:41.800Z"}
+  (lưu ý) migration 0004_auth_and_debt_status.sql chưa có — bỏ qua
+  [FAIL] 4b thu 100đ qua recordDebtPayment: đơn paymentStatus phải paid — pay={"ok":true,"error":null,"remaining":0}, order={"id":1,"orderCode":"DH20261109-6650","customerName":"Khách Thử","customerPhone":"","customerAddress":"","status":"confirmed","totalAmount":100,"note":"","stockDeducted":1,"depositAmount":0,"paymentStatus":"unpaid","deliveryPerson":"","deliveryFee":0,"expectedDelivery":"","reservedUntil":"","createdAt":"2026-11-09T10:05:41.819Z","updatedAt":"2026-11-09T10:05:41.819Z","items":[{"id":1,"orderId":1,"productId":1,"productSku":"BC-0930","productName":"SP Thử","quantity":1,"unitPrice":100,"lineTotal":100,"returnedQty":0,"costPrice":50}]}
+  [PASS] 5a App() có 2 lần early return (chưa đăng nhập / đổi PIN) — first=97924, second=98259
+  [FAIL] 5b mọi hook của App() đều nằm TRƯỚC lần early return đầu tiên — hook sau early return: useQuery@98661, useQuery@98789, useQuery@99014, useQuery@99192, useQuery@99389, useQuery@99549, useQuery@99688, useMemo@99846, useMutation@99986, useMutation@100953, useMutation@101597, useMutation@102112, useMutation@102468, useMutation@102859
+  [FAIL] 5c các useQuery dữ liệu có enabled: !!staff && !needPinChange — thiếu enabled: ["dashboard"], ["products", ["products-all"], ["movements", ["orders", ["suppliers", ["categories"]
+  (lưu ý) migration 0004_auth_and_debt_status.sql chưa có — bỏ qua
+  [PASS] R1a xuất quá tồn phải lỗi, tồn không đổi (5) — stock=5
+  [PASS] R1b đơn xác nhận vượt tồn phải lỗi, tồn không đổi (5) — stock=5
+  [PASS] R2a hủy đơn chưa trả: tồn 5 -> 3 -> 5 — 3? 3 -> 5
+  [PASS] R2b hủy lần 2 không hoàn trùng (vẫn 5) — stock=5
+  [PASS] R3a gửi trùng requestKey phiếu nhập: chỉ 1 phiếu, cùng refCode — ref1=PN20261109-8232 ref2=PN20261109-8232 movs 3->4
+  [PASS] R3b gửi trùng requestKey tạo đơn: chỉ 1 đơn, cùng orderCode — code1=DH20261109-3752 code2=DH20261109-3752 orders 1->2
+
+=== TỔNG KẾT ===
+1 — Vượt quyền (requireAuth + ma trận phân quyền + chống dò PIN): 6/15 PASS
+2 — Kiểm kê chốt theo delta (không mất hàng nhập/xuất xen giữa): 3/6 PASS
+3 — Trả hàng / hủy đơn không cộng thừa: 3/6 PASS
+4 — Công nợ khi hủy đơn / thu nợ: 2/5 PASS
+5 — Hooks sau early return ở màn hình đăng nhập (kiểm tra tĩnh App.tsx): 1/3 PASS
+Hồi quy — tồn không âm, hủy 2 lần, chống gửi trùng: 6/6 PASS
+TỔNG: 21 PASS, 20 FAIL
+KẾT LUẬN: CÒN LỖI — xem các mục FAIL ở trên.

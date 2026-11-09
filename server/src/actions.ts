@@ -72,7 +72,9 @@ async function ensureAdminSeed(db: Db): Promise<void> {
   await db.insert(schema.staff).values({ name: "Chủ cửa hàng", role: "admin", pinHash, pinSalt: salt, active: 1, mustChangePin: 1 });
 }
 
-// Token rỗng/null => null (chế độ tương thích cũ, được phép như chủ cửa hàng).
+// Token rỗng/null hoặc phiên không hợp lệ/hết hạn/tài khoản bị vô hiệu => null.
+// Không còn chế độ "tương thích cũ" cho phép không đăng nhập: mọi action (trừ
+// loginStaff) đều phải qua requireAuth() trước khi làm gì khác.
 async function resolveActor(db: Db, actorToken?: string): Promise<StaffRow | null> {
   const token = (actorToken ?? "").trim();
   if (!token) return null;
@@ -88,12 +90,27 @@ async function resolveActor(db: Db, actorToken?: string): Promise<StaffRow | nul
 function actorNameOf(actor: StaffRow | null): string {
   return actor ? actor.name : "Hệ thống (chưa đăng nhập)";
 }
-// Trả chuỗi lỗi tiếng Việt hoặc null. actor null (chưa đăng nhập) được phép (tương thích cũ).
-function requireRole(actor: StaffRow | null, allowed: string[], message: string): string | null {
-  if (!actor) return null;
+
+// Bắt buộc đăng nhập cho mọi action (trừ loginStaff). Phân biệt rõ 2 trường hợp:
+// - thiếu token/trống => "Cần đăng nhập để thực hiện thao tác này."
+// - token sai/hết hạn/tài khoản bị vô hiệu => "Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại."
+const AUTH_REQUIRED = "Cần đăng nhập để thực hiện thao tác này.";
+const AUTH_EXPIRED = "Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.";
+type AuthResult = { ok: true; actor: StaffRow } | { ok: false; error: string };
+async function requireAuth(db: Db, actorToken?: string): Promise<AuthResult> {
+  const token = (actorToken ?? "").trim();
+  if (!token) return { ok: false, error: AUTH_REQUIRED };
+  const actor = await resolveActor(db, token);
+  if (!actor) return { ok: false, error: AUTH_EXPIRED };
+  return { ok: true, actor };
+}
+// Trả chuỗi lỗi tiếng Việt hoặc null. Chỉ gọi sau khi requireAuth() đã chắc chắn actor khác null.
+function requireRole(actor: StaffRow, allowed: string[], message: string): string | null {
   if (!allowed.includes(actor.role)) return message;
   return null;
 }
+const ROLE_ADMIN_STOREKEEPER = ["admin", "storekeeper"];
+const ROLE_ALL_STAFF = ["admin", "storekeeper", "sales"];
 
 async function writeAudit(db: Db, actorName: string, action: string, entity: string, entityId: number, detailsObj: Record<string, unknown>): Promise<void> {
   await db.insert(schema.auditLogs).values({ actor: actorName, action, entity, entityId, details: JSON.stringify(detailsObj) });
@@ -169,7 +186,7 @@ function checkExpectedVersion(prod: ProdRow, expectedVersions: Record<string, nu
   return null;
 }
 function isOverdueDebt(d: { dueDate: string; status: string }, todayStr: string): boolean {
-  return d.status !== "paid" && d.dueDate !== "" && d.dueDate < todayStr;
+  return d.status !== "paid" && d.status !== "cancelled" && d.dueDate !== "" && d.dueDate < todayStr;
 }
 
 // ---------- Shapes ----------
@@ -229,16 +246,49 @@ function toDebt(d: typeof schema.debts.$inferSelect) {
 }
 
 // Tạo công nợ phải thu cho đơn (chỉ khi còn dư > 0). Dùng cho đơn xác nhận/giao/hoàn thành.
+// Công nợ đã bị void do hủy đơn (status "cancelled") không chặn việc tạo công nợ mới
+// nếu đơn đó sau này được xác nhận lại.
 async function createReceivableDebtIfNeeded(db: Db, order: { orderCode: string; customerName: string; totalAmount: number; depositAmount: number }): Promise<void> {
   const remaining = order.totalAmount - order.depositAmount;
   if (remaining <= 0) return;
   const existing = await db.select().from(schema.debts).where(eq(schema.debts.refCode, order.orderCode)).limit(1);
-  if (existing[0]) return;
+  if (existing[0] && existing[0].status !== "cancelled") return;
   await db.insert(schema.debts).values({
     partnerName: order.customerName, partnerType: "customer", kind: "receivable",
     totalAmount: remaining, paidAmount: 0, dueDate: "", refCode: order.orderCode,
     note: `Công nợ đơn ${order.orderCode}`, status: "open",
   });
+}
+
+// Hủy (void) công nợ phải thu gắn với đơn khi đơn bị hủy: còn lại về 0, trạng thái
+// "cancelled", giữ paidAmount làm lịch sử (totalAmount đặt bằng paidAmount).
+// Chỉ void công nợ còn dư (open/overdue); công nợ đã thu đủ (paid) giữ nguyên để
+// cửa hàng xử lý hoàn tiền thủ công, không viết lại lịch sử đã thu.
+async function voidReceivableDebtForOrder(db: Db, orderCode: string, actorName: string): Promise<void> {
+  const rows = await db.select().from(schema.debts).where(eq(schema.debts.refCode, orderCode));
+  for (const d of rows.filter((x) => x.kind === "receivable" && x.status !== "paid" && x.status !== "cancelled")) {
+    const remaining = Math.max(0, d.totalAmount - d.paidAmount);
+    if (remaining <= 0) continue;
+    await db.update(schema.debts).set({
+      totalAmount: d.paidAmount,
+      status: "cancelled",
+      note: d.note ? `${d.note} | Đã hủy đơn — công nợ đã xóa` : "Đã hủy đơn — công nợ đã xóa",
+    }).where(eq(schema.debts.id, d.id));
+    await writeAudit(db, actorName, "void_debt_on_cancel", "debt", d.id, { refCode: orderCode, paidAmount: d.paidAmount, voidedRemaining: remaining });
+  }
+}
+
+// Đồng bộ trạng thái thanh toán của đơn theo công nợ phải thu gắn với đơn.
+// Dùng sau mỗi lần thu nợ (recordDebtPayment) và sau khi trả hàng làm công nợ
+// về 0 (createReturn): cộng số tiền vừa thu vào cọc (không vượt tổng tiền đơn),
+// paymentStatus = paid khi công nợ còn 0, partial khi đã cọc > 0, unpaid khi chưa cọc.
+async function syncOrderPaymentFromDebt(db: Db, orderCode: string, amountJustCollected: number, debtRemainingAfter: number): Promise<void> {
+  const orderRows = await db.select().from(schema.orders).where(eq(schema.orders.orderCode, orderCode)).limit(1);
+  const order = orderRows[0];
+  if (!order) return;
+  const newDeposit = Math.min(order.totalAmount, order.depositAmount + amountJustCollected);
+  const paymentStatus = debtRemainingAfter === 0 ? "paid" : newDeposit > 0 ? "partial" : "unpaid";
+  await db.update(schema.orders).set({ depositAmount: newDeposit, paymentStatus, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
 }
 
 // ---------- Sao lưu / khôi phục ----------
@@ -283,8 +333,10 @@ export const Actions = {
       recentMovements: z.array(movementShape),
       chart7Days: z.array(z.object({ date: z.string(), label: z.string(), inQty: z.number(), outQty: z.number() })),
     }),
-    async handler(ctx) {
+    async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       const products = await db.select().from(schema.products);
       const movements = await db.select().from(schema.movements).orderBy(desc(schema.movements.id));
       const orders = await db.select().from(schema.orders);
@@ -347,6 +399,8 @@ export const Actions = {
     response: z.object({ products: z.array(productShape), categories: z.array(z.string()) }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       let rows = await db.select().from(schema.products).orderBy(desc(schema.products.updatedAt));
       if (args.search.trim()) {
         const q = args.search.trim().toLowerCase();
@@ -372,8 +426,12 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), id: z.number(), sku: z.string(), error: z.string().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, id: 0, sku: "", error: auth.error };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được thêm sản phẩm.");
+      if (roleErr) return { ok: false, id: 0, sku: "", error: roleErr };
       // ensure category exists
       const existingCat = await db.select().from(schema.categories).where(eq(schema.categories.name, args.category));
       if (existingCat.length === 0) {
@@ -421,7 +479,9 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), error: z.string().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
       const prod = await getProduct(db, args.id);
       if (!prod) return { ok: false, error: "Sản phẩm không tồn tại." };
@@ -437,9 +497,12 @@ export const Actions = {
       }
       const priceChanged = args.costPrice !== prod.costPrice || args.sellPrice !== prod.sellPrice;
       if (priceChanged) {
-        // Chỉ quản trị viên được đổi giá. Có token nhưng phiên không hợp lệ cũng chặn.
-        if ((args.actorToken ?? "").trim() && !actor) return { ok: false, error: "Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại." };
+        // Chỉ quản trị viên được đổi giá.
         const roleErr = requireRole(actor, ["admin"], "Chỉ quản trị viên được đổi giá.");
+        if (roleErr) return { ok: false, error: roleErr };
+      } else {
+        // Sửa thông tin không đổi giá: quản trị viên hoặc thủ kho.
+        const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được sửa sản phẩm.");
         if (roleErr) return { ok: false, error: roleErr };
       }
       const existingCat = await db.select().from(schema.categories).where(eq(schema.categories.name, args.category));
@@ -475,8 +538,12 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), error: z.string().nullable(), discontinued: z.boolean() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error, discontinued: false };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ["admin"], "Chỉ quản trị viên được xoá sản phẩm.");
+      if (roleErr) return { ok: false, error: roleErr, discontinued: false };
       const prod = await getProduct(db, args.id);
       if (!prod) return { ok: false, error: "Sản phẩm không tồn tại.", discontinued: false };
       if (prod.currentStock > 0) {
@@ -529,6 +596,8 @@ export const Actions = {
     response: z.object({ movements: z.array(movementShape) }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       let rows = await db.select().from(schema.movements).orderBy(desc(schema.movements.id));
       if (args.type !== "all") rows = rows.filter(r => r.type === args.type);
       if (args.search.trim()) {
@@ -550,8 +619,12 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), error: z.string().nullable(), newStock: z.number(), refCode: z.string(), version: z.number() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error, newStock: 0, refCode: "", version: 0 };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được tạo phiếu nhập/xuất.");
+      if (roleErr) return { ok: false, error: roleErr, newStock: 0, refCode: "", version: 0 };
       const key = (args.requestKey ?? "").trim();
       if (key) {
         const prev = await checkIdem(db, key, "createMovement");
@@ -606,8 +679,12 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), error: z.string().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được xoá phiếu.");
+      if (roleErr) return { ok: false, error: roleErr };
       const rows = await db.select().from(schema.movements).where(eq(schema.movements.id, args.id));
       const mov = rows[0];
       if (!mov) return { ok: false, error: "Không tìm thấy phiếu." };
@@ -641,10 +718,12 @@ export const Actions = {
 
   listSuppliers: defineAction({
     description: "Danh sách nhà cung cấp / đối tác.",
-    request: z.object({ search: z.string().default("") }),
+    request: z.object({ search: z.string().default(""), actorToken: z.string().optional() }),
     response: z.object({ suppliers: z.array(supplierShape) }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       let rows = await db.select().from(schema.suppliers).orderBy(desc(schema.suppliers.id));
       if (args.search.trim()) {
         const q = args.search.trim().toLowerCase();
@@ -656,10 +735,15 @@ export const Actions = {
 
   createSupplier: defineAction({
     description: "Thêm nhà cung cấp mới.",
-    request: z.object({ name: z.string().min(1), contactPerson: z.string().default(""), phone: z.string().default(""), email: z.string().default(""), address: z.string().default(""), notes: z.string().default("") }),
+    request: z.object({ actorToken: z.string().optional(), name: z.string().min(1), contactPerson: z.string().default(""), phone: z.string().default(""), email: z.string().default(""), address: z.string().default(""), notes: z.string().default("") }),
     response: z.object({ ok: z.boolean(), id: z.number() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
+      const actor = auth.actor;
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được quản lý nhà cung cấp.");
+      if (roleErr) throw new Error(roleErr);
       const res = await db.insert(schema.suppliers).values({ name: args.name.trim(), contactPerson: args.contactPerson.trim(), phone: args.phone.trim(), email: args.email.trim(), address: args.address.trim(), notes: args.notes.trim() }).returning({ id: schema.suppliers.id });
       ctx.invalidateQueries();
       return { ok: true, id: res[0]?.id ?? 0 };
@@ -668,10 +752,15 @@ export const Actions = {
 
   updateSupplier: defineAction({
     description: "Cập nhật nhà cung cấp.",
-    request: z.object({ id: z.number(), name: z.string().min(1), contactPerson: z.string().default(""), phone: z.string().default(""), email: z.string().default(""), address: z.string().default(""), notes: z.string().default("") }),
+    request: z.object({ actorToken: z.string().optional(), id: z.number(), name: z.string().min(1), contactPerson: z.string().default(""), phone: z.string().default(""), email: z.string().default(""), address: z.string().default(""), notes: z.string().default("") }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
+      const actor = auth.actor;
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được quản lý nhà cung cấp.");
+      if (roleErr) throw new Error(roleErr);
       await db.update(schema.suppliers).set({ name: args.name.trim(), contactPerson: args.contactPerson.trim(), phone: args.phone.trim(), email: args.email.trim(), address: args.address.trim(), notes: args.notes.trim() }).where(eq(schema.suppliers.id, args.id));
       ctx.invalidateQueries();
       return { ok: true };
@@ -680,10 +769,15 @@ export const Actions = {
 
   deleteSupplier: defineAction({
     description: "Xoá nhà cung cấp.",
-    request: z.object({ id: z.number() }),
+    request: z.object({ actorToken: z.string().optional(), id: z.number() }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
+      const actor = auth.actor;
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được quản lý nhà cung cấp.");
+      if (roleErr) throw new Error(roleErr);
       await db.delete(schema.suppliers).where(eq(schema.suppliers.id, args.id));
       ctx.invalidateQueries();
       return { ok: true };
@@ -692,10 +786,12 @@ export const Actions = {
 
   listCategories: defineAction({
     description: "Danh sách danh mục sản phẩm.",
-    request: z.object({}),
+    request: z.object({ actorToken: z.string().optional() }),
     response: z.object({ categories: z.array(z.object({ id: z.number(), name: z.string(), productCount: z.number() })) }),
-    async handler(ctx) {
+    async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       const cats = await db.select().from(schema.categories).orderBy(schema.categories.name);
       const prods = await db.select().from(schema.products);
       return { categories: cats.map(c => ({ id: c.id, name: c.name, productCount: prods.filter(p => p.category === c.name).length })) };
@@ -704,10 +800,15 @@ export const Actions = {
 
   createCategory: defineAction({
     description: "Thêm danh mục sản phẩm mới.",
-    request: z.object({ name: z.string().min(1) }),
+    request: z.object({ actorToken: z.string().optional(), name: z.string().min(1) }),
     response: z.object({ ok: z.boolean(), error: z.string().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error };
+      const actor = auth.actor;
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được thêm danh mục.");
+      if (roleErr) return { ok: false, error: roleErr };
       const dup = await db.select().from(schema.categories).where(eq(schema.categories.name, args.name.trim()));
       if (dup.length > 0) return { ok: false, error: "Danh mục đã tồn tại." };
       await db.insert(schema.categories).values({ name: args.name.trim() });
@@ -718,10 +819,15 @@ export const Actions = {
 
   deleteCategory: defineAction({
     description: "Xoá danh mục (sản phẩm thuộc danh mục sẽ chuyển về 'Khác').",
-    request: z.object({ id: z.number() }),
+    request: z.object({ actorToken: z.string().optional(), id: z.number() }),
     response: z.object({ ok: z.boolean() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
+      const actor = auth.actor;
+      const roleErr = requireRole(actor, ["admin"], "Chỉ quản trị viên được xoá danh mục.");
+      if (roleErr) throw new Error(roleErr);
       const catRows = await db.select().from(schema.categories).where(eq(schema.categories.id, args.id));
       const cat = catRows[0];
       if (cat) {
@@ -735,10 +841,12 @@ export const Actions = {
 
   listOrders: defineAction({
     description: "Danh sách đơn hàng kèm dòng hàng, lọc theo trạng thái và tìm kiếm.",
-    request: z.object({ status: z.string().default("all"), search: z.string().default("") }),
+    request: z.object({ status: z.string().default("all"), search: z.string().default(""), actorToken: z.string().optional() }),
     response: z.object({ orders: z.array(orderShape) }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       let rows = await db.select().from(schema.orders).orderBy(desc(schema.orders.id));
       if (args.status !== "all") rows = rows.filter(r => r.status === args.status);
       if (args.search.trim()) {
@@ -765,8 +873,12 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), error: z.string().nullable(), orderCode: z.string(), id: z.number() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error, orderCode: "", id: 0 };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ALL_STAFF, "Chỉ nhân viên cửa hàng được tạo đơn hàng.");
+      if (roleErr) return { ok: false, error: roleErr, orderCode: "", id: 0 };
       const key = (args.requestKey ?? "").trim();
       if (key) {
         const prev = await checkIdem(db, key, "createOrder");
@@ -873,8 +985,12 @@ export const Actions = {
     }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error, pendingRestocks: [] };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ALL_STAFF, "Chỉ nhân viên cửa hàng được đổi trạng thái đơn.");
+      if (roleErr) return { ok: false, error: roleErr, pendingRestocks: [] };
       const pendingRestocks: { productName: string; quantity: number }[] = [];
       const rows = await db.select().from(schema.orders).where(eq(schema.orders.id, args.id));
       const order = rows[0];
@@ -989,23 +1105,29 @@ export const Actions = {
           const applied: StockApply[] = [];
           const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
           for (const it of items) {
+            // Chỉ hoàn lại phần CHƯA trả (net = số lượng − đã trả): hàng đã trả khách
+            // trước đó đã được cộng lại kho lúc trả, hủy đơn không được cộng lần nữa.
+            const netQty = Math.max(0, it.quantity - (it.returnedQty ?? 0));
             const p = prodById.get(it.productId);
             if (!p || p.status === "discontinued") {
               // Không bỏ qua im lặng: ghi vào phiếu chờ hoàn kho để xử lý sau.
-              pendingRestocks.push({ productName: it.productName, quantity: it.quantity });
-              await db.insert(schema.pendingRestocks).values({
-                orderCode: order.orderCode, productId: it.productId, productSku: it.productSku, productName: it.productName,
-                quantity: it.quantity, unitPrice: it.unitPrice, reason: "Sản phẩm đã bị xóa/ngưng khi hủy đơn",
-              });
+              if (netQty > 0) {
+                pendingRestocks.push({ productName: it.productName, quantity: netQty });
+                await db.insert(schema.pendingRestocks).values({
+                  orderCode: order.orderCode, productId: it.productId, productSku: it.productSku, productName: it.productName,
+                  quantity: netQty, unitPrice: it.unitPrice, reason: "Sản phẩm đã bị xóa/ngưng khi hủy đơn",
+                });
+              }
               continue;
             }
-            const before = p.currentStock; const after = before + it.quantity;
+            if (netQty <= 0) continue; // dòng này đã trả hết: không sinh phiếu hoàn kho
+            const before = p.currentStock; const after = before + netQty;
             const afterReserved = isReservedOrder ? Math.max(0, p.reservedQty - it.quantity) : p.reservedQty;
             const one = await applyStock(db, p, after, afterReserved);
             if (!one) { await compensateStock(db, applied); return { ok: false, error: VERSION_CONFLICT, pendingRestocks }; }
             trackApplied(p, one);
             applied.push(one);
-            movData.push({ prod: p, before, after, qty: it.quantity });
+            movData.push({ prod: p, before, after, qty: netQty });
           }
           if (movData.length > 0) {
             await batchAll(db, movData.map((m) => db.insert(schema.movements).values({
@@ -1018,6 +1140,8 @@ export const Actions = {
         } else {
           await db.update(schema.orders).set({ status: target, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
         }
+        // Hủy đơn (không áp cho chuyển giữ hàng -> chờ xử lý): void công nợ phải thu của đơn.
+        if (target === "cancelled") await voidReceivableDebtForOrder(db, order.orderCode, actorName);
       } else {
         await db.update(schema.orders).set({ status: target, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
       }
@@ -1045,8 +1169,12 @@ export const Actions = {
     }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error, refCode: "", results: [] };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được tạo phiếu nhập/xuất.");
+      if (roleErr) return { ok: false, error: roleErr, refCode: "", results: [] };
       const key = (args.requestKey ?? "").trim();
       if (key) {
         const prev = await checkIdem(db, key, "createMovementBatch");
@@ -1120,13 +1248,17 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), error: z.string().nullable(), refCode: z.string(), newStatus: z.string() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error, refCode: "", newStatus: "" };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ALL_STAFF, "Chỉ nhân viên cửa hàng được trả hàng.");
+      if (roleErr) return { ok: false, error: roleErr, refCode: "", newStatus: "" };
       const orderRows = await db.select().from(schema.orders).where(eq(schema.orders.id, args.orderId));
       const order = orderRows[0];
       if (!order) return { ok: false, error: "Không tìm thấy đơn hàng.", refCode: "", newStatus: "" };
-      if (!["confirmed", "delivering", "completed"].includes(order.status)) {
-        return { ok: false, error: "Chỉ trả hàng được khi đơn đang ở trạng thái đã xác nhận, đang giao hoặc hoàn thành.", refCode: "", newStatus: order.status };
+      if (!["confirmed", "delivering", "completed", "partially_returned"].includes(order.status)) {
+        return { ok: false, error: "Chỉ trả hàng được khi đơn đang ở trạng thái đã xác nhận, đang giao, hoàn thành hoặc đã trả một phần.", refCode: "", newStatus: order.status };
       }
       const items = await db.select().from(schema.orderItems).where(eq(schema.orderItems.orderId, order.id));
       // Validate hết trước.
@@ -1159,7 +1291,7 @@ export const Actions = {
       const allReturned = items.every((i) => (newReturned.get(i.id) ?? i.returnedQty) >= i.quantity);
       const newStatus = allReturned ? "returned" : "partially_returned";
       const debtRows = await db.select().from(schema.debts).where(eq(schema.debts.refCode, order.orderCode));
-      const debt = debtRows.find((d) => d.kind === "receivable");
+      const debt = debtRows.find((d) => d.kind === "receivable" && d.status !== "cancelled");
       const stmts: BatchItem<"sqlite">[] = [
         ...movData.map((m) => db.insert(schema.movements).values({
           productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "in", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
@@ -1178,6 +1310,12 @@ export const Actions = {
         }).where(eq(schema.debts.id, debt.id)));
       }
       await batchAll(db, stmts);
+      // Trả hàng làm công nợ về 0 thì đồng bộ trạng thái thanh toán của đơn
+      // (đơn coi như đã thanh toán đủ — không còn nợ).
+      if (debt) {
+        const debtRemainingAfter = Math.max(0, Math.max(0, debt.totalAmount - refundTotal) - debt.paidAmount);
+        if (debtRemainingAfter === 0) await syncOrderPaymentFromDebt(db, order.orderCode, refundTotal, 0);
+      }
       await writeAudit(db, actorName, "create_return", "order", order.id, { orderCode: order.orderCode, refundTotal, newStatus, reason: args.reason.trim() });
       ctx.invalidateQueries();
       return { ok: true, error: null, refCode: order.orderCode, newStatus };
@@ -1190,8 +1328,12 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), error: z.string().nullable(), depositAmount: z.number(), paymentStatus: z.string() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error, depositAmount: 0, paymentStatus: "" };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ALL_STAFF, "Chỉ nhân viên cửa hàng được ghi nhận cọc.");
+      if (roleErr) return { ok: false, error: roleErr, depositAmount: 0, paymentStatus: "" };
       const orderRows = await db.select().from(schema.orders).where(eq(schema.orders.id, args.orderId));
       const order = orderRows[0];
       if (!order) return { ok: false, error: "Không tìm thấy đơn hàng.", depositAmount: 0, paymentStatus: "" };
@@ -1202,7 +1344,7 @@ export const Actions = {
       const paymentStatus = newDeposit >= order.totalAmount ? "paid" : "partial";
       await db.update(schema.orders).set({ depositAmount: newDeposit, paymentStatus, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
       const debtRows = await db.select().from(schema.debts).where(eq(schema.debts.refCode, order.orderCode));
-      const debt = debtRows.find((d) => d.kind === "receivable");
+      const debt = debtRows.find((d) => d.kind === "receivable" && d.status !== "cancelled");
       if (debt) {
         const newPaid = Math.min(debt.totalAmount, debt.paidAmount + args.amount);
         await db.update(schema.debts).set({ paidAmount: newPaid, status: newPaid >= debt.totalAmount ? "paid" : debt.status }).where(eq(schema.debts.id, debt.id));
@@ -1219,8 +1361,12 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), error: z.string().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ALL_STAFF, "Chỉ nhân viên cửa hàng được huỷ giữ hàng.");
+      if (roleErr) return { ok: false, error: roleErr };
       const orderRows = await db.select().from(schema.orders).where(eq(schema.orders.id, args.orderId));
       const order = orderRows[0];
       if (!order) return { ok: false, error: "Không tìm thấy đơn hàng." };
@@ -1246,6 +1392,8 @@ export const Actions = {
         })),
         db.update(schema.orders).set({ status: "cancelled", stockDeducted: 0, updatedAt: new Date() }).where(eq(schema.orders.id, order.id)),
       ]);
+      // Đơn giữ hàng cũng đã sinh công nợ phải thu lúc tạo: hủy giữ thì void công nợ như hủy đơn.
+      await voidReceivableDebtForOrder(db, order.orderCode, actorName);
       await writeAudit(db, actorName, "release_reservation", "order", order.id, { orderCode: order.orderCode });
       ctx.invalidateQueries();
       return { ok: true, error: null };
@@ -1261,7 +1409,9 @@ export const Actions = {
     }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error, applied: false, diffs: [] };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
       const products = await db.select().from(schema.products);
       const movements = await db.select().from(schema.movements).orderBy(schema.movements.id);
@@ -1278,8 +1428,7 @@ export const Actions = {
         }
       }
       if (!args.apply) return { ok: true, error: null, applied: false, diffs };
-      // apply=true: có token thì phải là admin; không token thì cho phép (ghi actor "Hệ thống").
-      if ((args.actorToken ?? "").trim() && !actor) return { ok: false, error: "Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.", applied: false, diffs };
+      // apply=true: chỉ quản trị viên được chốt lại tồn theo sổ phiếu.
       const roleErr = requireRole(actor, ["admin"], "Chỉ quản trị viên được áp dụng đối chiếu tồn kho.");
       if (roleErr) return { ok: false, error: roleErr, applied: false, diffs };
       const applied: StockApply[] = [];
@@ -1306,13 +1455,15 @@ export const Actions = {
 
   getPendingRestocks: defineAction({
     description: "Danh sách các khoản hoàn kho đang chờ xử lý (sản phẩm bị xoá/ngưng khi huỷ đơn).",
-    request: z.object({}),
+    request: z.object({ actorToken: z.string().optional() }),
     response: z.object({ items: z.array(z.object({
       id: z.number(), orderCode: z.string(), productId: z.number(), productSku: z.string(), productName: z.string(),
       quantity: z.number(), unitPrice: z.number(), reason: z.string(), status: z.string(), createdAt: z.string(),
     })) }),
-    async handler(ctx) {
+    async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       const rows = await db.select().from(schema.pendingRestocks).orderBy(desc(schema.pendingRestocks.id));
       return { items: rows.map((r) => ({ id: r.id, orderCode: r.orderCode, productId: r.productId, productSku: r.productSku, productName: r.productName, quantity: r.quantity, unitPrice: r.unitPrice, reason: r.reason, status: r.status, createdAt: r.createdAt.toISOString() })) };
     },
@@ -1324,8 +1475,12 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), error: z.string().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được xử lý hoàn kho chờ xử lý.");
+      if (roleErr) return { ok: false, error: roleErr };
       const rows = await db.select().from(schema.pendingRestocks).where(eq(schema.pendingRestocks.id, args.id));
       const item = rows[0];
       if (!item) return { ok: false, error: "Không tìm thấy khoản chờ hoàn kho." };
@@ -1365,16 +1520,38 @@ export const Actions = {
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       await ensureAdminSeed(db);
+      const now = Date.now();
       const allStaff = await db.select().from(schema.staff).where(eq(schema.staff.active, 1));
+      // Chống dò PIN (đơn giản): đăng nhập chỉ dùng mã PIN nên lần sai không gắn được
+      // với một tài khoản cụ thể — mỗi lần sai tăng bộ đếm cho mọi tài khoản đang hoạt
+      // động; đủ 5 lần sai liên tiếp thì khóa toàn bộ đăng nhập 15 phút.
       let matched: StaffRow | null = null;
       for (const st of allStaff) {
+        if (st.lockedUntil && st.lockedUntil.getTime() > now) continue; // đang bị khóa: không cho khớp
         const hashed = await hashPin(args.pin, st.pinSalt);
         if (hashed === st.pinHash) { matched = st; break; }
       }
-      if (!matched) return { ok: false, token: "", error: "Mã PIN không đúng.", staff: null };
+      if (!matched) {
+        const anyLocked = allStaff.some((st) => st.lockedUntil && st.lockedUntil.getTime() > now);
+        for (const st of allStaff) {
+          if (st.lockedUntil && st.lockedUntil.getTime() > now) continue; // đang bị khóa: giữ nguyên
+          // Khóa đã hết hạn thì đếm lại từ đầu (1 lần sai này), không khóa ngay lại.
+          const expiredLock = st.lockedUntil && st.lockedUntil.getTime() <= now;
+          const attempts = expiredLock ? 1 : (st.failedAttempts ?? 0) + 1;
+          await db.update(schema.staff).set({
+            failedAttempts: attempts,
+            lockedUntil: attempts >= 5 ? new Date(now + 15 * 60 * 1000) : null,
+          }).where(eq(schema.staff.id, st.id));
+        }
+        if (anyLocked) return { ok: false, token: "", error: "Tài khoản tạm khóa 15 phút do nhập sai mã PIN quá nhiều lần. Vui lòng thử lại sau.", staff: null };
+        return { ok: false, token: "", error: "Mã PIN không đúng.", staff: null };
+      }
       const token = newToken();
       const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000);
-      await db.insert(schema.staffSessions).values({ token, staffId: matched.id, expiresAt });
+      await batchAll(db, [
+        db.insert(schema.staffSessions).values({ token, staffId: matched.id, expiresAt }),
+        db.update(schema.staff).set({ failedAttempts: 0, lockedUntil: null }).where(eq(schema.staff.id, matched.id)),
+      ]);
       return { ok: true, token, error: null, staff: { id: matched.id, name: matched.name, role: matched.role, mustChangePin: matched.mustChangePin } };
     },
   }),
@@ -1400,7 +1577,7 @@ export const Actions = {
   }),
 
   listStaff: defineAction({
-    description: "Danh sách nhân viên (chỉ quản trị viên; không đăng nhập vẫn xem được để tương thích cũ).",
+    description: "Danh sách nhân viên (chỉ quản trị viên đã đăng nhập).",
     request: z.object({ actorToken: z.string().optional() }),
     response: z.object({
       staff: z.array(z.object({ id: z.number(), name: z.string(), role: z.string(), active: z.number(), mustChangePin: z.number() })),
@@ -1409,23 +1586,25 @@ export const Actions = {
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       await ensureAdminSeed(db);
-      const actor = await resolveActor(db, args.actorToken);
-      if ((args.actorToken ?? "").trim() && !actor) return { staff: [], error: "Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại." };
-      if (actor && actor.role !== "admin") return { staff: [], error: "Chỉ quản trị viên được xem danh sách nhân viên." };
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { staff: [], error: auth.error };
+      const actor = auth.actor;
+      if (actor.role !== "admin") return { staff: [], error: "Chỉ quản trị viên được xem danh sách nhân viên." };
       const rows = await db.select().from(schema.staff).orderBy(schema.staff.id);
       return { staff: rows.map((s) => ({ id: s.id, name: s.name, role: s.role, active: s.active, mustChangePin: s.mustChangePin })), error: null };
     },
   }),
 
   createStaff: defineAction({
-    description: "Thêm nhân viên mới (chỉ quản trị viên; không đăng nhập vẫn được để tương thích cũ).",
+    description: "Thêm nhân viên mới (chỉ quản trị viên đã đăng nhập).",
     request: z.object({ actorToken: z.string().optional(), name: z.string().min(1), role: z.enum(["admin", "storekeeper", "sales"]), pin: z.string().min(1) }),
     response: z.object({ ok: z.boolean(), id: z.number(), error: z.string().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       await ensureAdminSeed(db);
-      const actor = await resolveActor(db, args.actorToken);
-      if ((args.actorToken ?? "").trim() && !actor) return { ok: false, id: 0, error: "Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại." };
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, id: 0, error: auth.error };
+      const actor = auth.actor;
       const roleErr = requireRole(actor, ["admin"], "Chỉ quản trị viên được thêm nhân viên.");
       if (roleErr) return { ok: false, id: 0, error: roleErr };
       if (!/^\d{4,8}$/.test(args.pin)) return { ok: false, id: 0, error: "Mã PIN phải gồm 4–8 chữ số." };
@@ -1447,8 +1626,9 @@ export const Actions = {
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
       await ensureAdminSeed(db);
-      const actor = await resolveActor(db, args.actorToken);
-      if ((args.actorToken ?? "").trim() && !actor) return { ok: false, error: "Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại." };
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error };
+      const actor = auth.actor;
       const roleErr = requireRole(actor, ["admin"], "Chỉ quản trị viên được thay đổi trạng thái nhân viên.");
       if (roleErr) return { ok: false, error: roleErr };
       const rows = await db.select().from(schema.staff).where(eq(schema.staff.id, args.id));
@@ -1472,6 +1652,8 @@ export const Actions = {
     response: z.object({ logs: z.array(z.object({ id: z.number(), actor: z.string(), action: z.string(), entity: z.string(), entityId: z.number(), details: z.string(), createdAt: z.string() })) }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       let rows = await db.select().from(schema.auditLogs).orderBy(desc(schema.auditLogs.id));
       if (args.actor.trim()) {
         const q = args.actor.trim().toLowerCase();
@@ -1500,7 +1682,7 @@ export const Actions = {
 
   listPriceHistory: defineAction({
     description: "Lịch sử thay đổi giá nhập/giá bán của sản phẩm.",
-    request: z.object({ productId: z.number().optional() }),
+    request: z.object({ actorToken: z.string().optional(), productId: z.number().optional() }),
     response: z.object({ history: z.array(z.object({
       id: z.number(), productId: z.number(), productSku: z.string(), productName: z.string(),
       oldCost: z.number(), newCost: z.number(), oldSell: z.number(), newSell: z.number(),
@@ -1508,6 +1690,8 @@ export const Actions = {
     })) }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       let rows = await db.select().from(schema.priceHistory).orderBy(desc(schema.priceHistory.id));
       if (args.productId !== undefined) rows = rows.filter((r) => r.productId === args.productId);
       const products = await db.select().from(schema.products);
@@ -1523,8 +1707,13 @@ export const Actions = {
     description: "Xuất toàn bộ dữ liệu kho thành chuỗi JSON để sao lưu (không gồm mã PIN nhân viên).",
     request: z.object({ actorToken: z.string().optional() }),
     response: z.object({ ok: z.boolean(), data: z.string(), error: z.string().nullable(), note: z.string() }),
-    async handler(ctx) {
+    async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, data: "", error: auth.error, note: BACKUP_PIN_NOTE };
+      const actor = auth.actor;
+      const roleErr = requireRole(actor, ["admin"], "Chỉ quản trị viên được xuất sao lưu.");
+      if (roleErr) return { ok: false, data: "", error: roleErr, note: BACKUP_PIN_NOTE };
       try {
         const dataObj = await buildBackupData(db);
         return { ok: true, data: JSON.stringify(dataObj), error: null, note: BACKUP_PIN_NOTE };
@@ -1540,8 +1729,12 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), id: z.number(), size: z.number(), error: z.string().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, id: 0, size: 0, error: auth.error };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được tạo bản sao lưu.");
+      if (roleErr) return { ok: false, id: 0, size: 0, error: roleErr };
       try {
         const dataObj = await buildBackupData(db);
         const data = JSON.stringify(dataObj);
@@ -1562,8 +1755,10 @@ export const Actions = {
     description: "Danh sách các bản sao lưu đã lưu trên máy chủ.",
     request: z.object({ actorToken: z.string().optional() }),
     response: z.object({ backups: z.array(z.object({ id: z.number(), createdAt: z.string(), createdBy: z.string(), sizeBytes: z.number() })) }),
-    async handler(ctx) {
+    async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       const rows = await db.select().from(schema.backups).orderBy(desc(schema.backups.id));
       return { backups: rows.map((b) => ({ id: b.id, createdAt: b.createdAt.toISOString(), createdBy: b.createdBy, sizeBytes: b.sizeBytes })) };
     },
@@ -1575,9 +1770,9 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), error: z.string().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      if (!(args.actorToken ?? "").trim()) return { ok: false, error: "Cần đăng nhập tài khoản quản trị để khôi phục." };
-      const actor = await resolveActor(db, args.actorToken);
-      if (!actor) return { ok: false, error: "Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại." };
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error };
+      const actor = auth.actor;
       if (actor.role !== "admin") return { ok: false, error: "Chỉ quản trị viên được khôi phục dữ liệu." };
       const rows = await db.select().from(schema.backups).where(eq(schema.backups.id, args.backupId));
       const backup = rows[0];
@@ -1665,7 +1860,7 @@ export const Actions = {
           id: d["id"] as number, partnerName: String(d["partnerName"] ?? ""), partnerType: (d["partnerType"] as "customer" | "supplier") ?? "customer",
           kind: (d["kind"] as "receivable" | "payable") ?? "receivable", totalAmount: (d["totalAmount"] as number) ?? 0,
           paidAmount: (d["paidAmount"] as number) ?? 0, dueDate: String(d["dueDate"] ?? ""), refCode: String(d["refCode"] ?? ""),
-          note: String(d["note"] ?? ""), status: (d["status"] as "open" | "paid" | "overdue") ?? "open", createdAt: toDate(d["createdAt"]),
+          note: String(d["note"] ?? ""), status: (d["status"] as "open" | "paid" | "overdue" | "cancelled") ?? "open", createdAt: toDate(d["createdAt"]),
         });
       }
       for (const dp of arr("debtPayments")) {
@@ -1731,7 +1926,7 @@ export const Actions = {
 
   listDebts: defineAction({
     description: "Danh sách công nợ phải thu/phải trả, kèm số còn lại.",
-    request: z.object({ kind: z.enum(["receivable", "payable", "all"]).default("all") }),
+    request: z.object({ actorToken: z.string().optional(), kind: z.enum(["receivable", "payable", "all"]).default("all") }),
     response: z.object({ debts: z.array(z.object({
       id: z.number(), partnerName: z.string(), partnerType: z.string(), kind: z.string(),
       totalAmount: z.number(), paidAmount: z.number(), remaining: z.number(), dueDate: z.string(),
@@ -1739,6 +1934,8 @@ export const Actions = {
     })) }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       let rows = await db.select().from(schema.debts).orderBy(desc(schema.debts.id));
       if (args.kind !== "all") rows = rows.filter((r) => r.kind === args.kind);
       return { debts: rows.map(toDebt) };
@@ -1751,8 +1948,12 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), error: z.string().nullable(), remaining: z.number() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error, remaining: 0 };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ALL_STAFF, "Chỉ nhân viên cửa hàng được ghi nhận thanh toán công nợ.");
+      if (roleErr) return { ok: false, error: roleErr, remaining: 0 };
       const rows = await db.select().from(schema.debts).where(eq(schema.debts.id, args.debtId));
       const debt = rows[0];
       if (!debt) return { ok: false, error: "Không tìm thấy khoản công nợ.", remaining: 0 };
@@ -1766,6 +1967,11 @@ export const Actions = {
         db.update(schema.debts).set({ paidAmount: newPaid, status: newRemaining === 0 ? "paid" : debt.status }).where(eq(schema.debts.id, debt.id)),
         db.insert(schema.debtPayments).values({ debtId: debt.id, amount: args.amount, method: args.method.trim(), note: args.note.trim() }),
       ]);
+      // Đồng bộ đơn hàng gắn với công nợ phải thu này: tiền vừa thu cộng vào cọc,
+      // thu đủ thì đơn chuyển sang đã thanh toán đủ.
+      if (debt.kind === "receivable" && debt.refCode) {
+        await syncOrderPaymentFromDebt(db, debt.refCode, args.amount, newRemaining);
+      }
       await writeAudit(db, actorName, "record_debt_payment", "debt", debt.id, { partnerName: debt.partnerName, amount: args.amount, method: args.method.trim(), remaining: newRemaining });
       ctx.invalidateQueries();
       return { ok: true, error: null, remaining: newRemaining };
@@ -1778,8 +1984,12 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), id: z.number(), code: z.string(), error: z.string().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, id: 0, code: "", error: auth.error };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được tạo đợt kiểm kê.");
+      if (roleErr) return { ok: false, id: 0, code: "", error: roleErr };
       let code = "";
       for (let attempt = 0; attempt < 5; attempt++) {
         const candidate = genStocktakeCode();
@@ -1798,14 +2008,16 @@ export const Actions = {
 
   listStocktakes: defineAction({
     description: "Danh sách phiếu kiểm kê kèm các dòng đã đếm.",
-    request: z.object({}),
+    request: z.object({ actorToken: z.string().optional() }),
     response: z.object({ stocktakes: z.array(z.object({
       id: z.number(), code: z.string(), note: z.string(), status: z.string(), createdBy: z.string(),
       createdAt: z.string(), closedAt: z.string().nullable(),
       items: z.array(z.object({ id: z.number(), productId: z.number(), productSku: z.string(), productName: z.string(), countedQty: z.number(), systemQty: z.number(), diffQty: z.number(), note: z.string() })),
     })) }),
-    async handler(ctx) {
+    async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       const takes = await db.select().from(schema.stocktakes).orderBy(desc(schema.stocktakes.id));
       const allItems = await db.select().from(schema.stocktakeItems);
       return { stocktakes: takes.map((t) => ({
@@ -1822,6 +2034,11 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), error: z.string().nullable() }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error };
+      const actor = auth.actor;
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được lưu số đếm kiểm kê.");
+      if (roleErr) return { ok: false, error: roleErr };
       const takeRows = await db.select().from(schema.stocktakes).where(eq(schema.stocktakes.id, args.stocktakeId));
       const take = takeRows[0];
       if (!take) return { ok: false, error: "Không tìm thấy phiếu kiểm kê." };
@@ -1846,42 +2063,56 @@ export const Actions = {
   }),
 
   closeStocktake: defineAction({
-    description: "Đóng phiếu kiểm kê: các dòng lệch sẽ ghi phiếu điều chỉnh tồn về số đếm thực tế.",
+    description: "Đóng phiếu kiểm kê: mỗi dòng lệch áp chênh lệch lúc đếm (đếm − sổ lúc đếm) vào tồn hiện tại lúc chốt, để không mất hàng nhập/xuất xen giữa lúc đếm và lúc chốt.",
     request: z.object({ actorToken: z.string().optional(), stocktakeId: z.number() }),
     response: z.object({
       ok: z.boolean(), error: z.string().nullable(),
-      diffs: z.array(z.object({ productSku: z.string(), productName: z.string(), systemQty: z.number(), countedQty: z.number(), diff: z.number() })),
+      diffs: z.array(z.object({ productSku: z.string(), productName: z.string(), systemQty: z.number(), countedQty: z.number(), diff: z.number(), systemQtyAtCount: z.number(), systemQtyAtClose: z.number(), appliedDiff: z.number() })),
     }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, error: auth.error, diffs: [] };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được chốt kiểm kê.");
+      if (roleErr) return { ok: false, error: roleErr, diffs: [] };
       const takeRows = await db.select().from(schema.stocktakes).where(eq(schema.stocktakes.id, args.stocktakeId));
       const take = takeRows[0];
       if (!take) return { ok: false, error: "Không tìm thấy phiếu kiểm kê.", diffs: [] };
       if (take.status !== "draft") return { ok: false, error: "Phiếu kiểm kê đã đóng.", diffs: [] };
       const items = await db.select().from(schema.stocktakeItems).where(eq(schema.stocktakeItems.stocktakeId, take.id));
       const diffItems = items.filter((i) => i.diffQty !== 0);
-      const diffs = diffItems.map((i) => ({ productSku: i.productSku, productName: i.productName, systemQty: i.systemQty, countedQty: i.countedQty, diff: i.diffQty }));
+      const diffs: { productSku: string; productName: string; systemQty: number; countedQty: number; diff: number; systemQtyAtCount: number; systemQtyAtClose: number; appliedDiff: number }[] = [];
       const applied: StockApply[] = [];
-      const movData: { prod: ProdRow; item: (typeof items)[number] }[] = [];
+      const movData: { prod: ProdRow; item: (typeof items)[number]; before: number; after: number }[] = [];
       for (const item of diffItems) {
         const prod = await getProduct(db, item.productId);
-        if (!prod) return { ok: false, error: `Sản phẩm "${item.productName}" đã bị xoá khỏi kho, không thể điều chỉnh tồn.`, diffs };
-        // systemQty lưu lúc đếm có thể đã cũ: dùng tồn hiện tại làm gốc, điều chỉnh về số đếm.
-        const one = await applyStock(db, prod, item.countedQty, prod.reservedQty);
+        if (!prod || prod.status === "discontinued") return { ok: false, error: `Sản phẩm "${item.productName}" đã bị xoá hoặc ngưng kinh doanh, không thể điều chỉnh tồn.`, diffs };
+        // Chốt theo delta: chênh lệch ghi lúc đếm (đếm − sổ lúc đếm) được cộng vào
+        // tồn HIỆN TẠI lúc chốt, để không nuốt mất hàng nhập/xuất xen giữa lúc đếm và lúc chốt.
+        // VD: sổ lúc đếm 4, đếm được 9 (diff +5), nhập thêm 5 (tồn 9) -> chốt ghi tồn 14.
+        const currentStock = prod.currentStock;
+        const after = currentStock + item.diffQty;
+        if (after < 0) return { ok: false, error: `Không thể chốt kiểm kê: tồn của "${item.productName}" sau điều chỉnh sẽ âm (${after}). Hãy kiểm tra lại số đếm hoặc phiếu nhập/xuất gần đây.`, diffs };
+        const one = await applyStock(db, prod, after, prod.reservedQty);
         if (!one) { await compensateStock(db, applied); return { ok: false, error: VERSION_CONFLICT, diffs }; }
         trackApplied(prod, one);
         applied.push(one);
-        movData.push({ prod, item });
+        movData.push({ prod, item, before: currentStock, after });
+        // Diffs trả về tính lại theo tồn hiện tại lúc chốt (systemQty = tồn lúc chốt,
+        // diff = đếm − tồn lúc chốt); số điều chỉnh thực tế áp vào kho là appliedDiff.
+        diffs.push({ productSku: item.productSku, productName: item.productName, systemQty: currentStock, countedQty: item.countedQty, diff: item.countedQty - currentStock, systemQtyAtCount: item.systemQty, systemQtyAtClose: currentStock, appliedDiff: item.diffQty });
       }
       await batchAll(db, [
         ...movData.map((m) => db.insert(schema.movements).values({
           productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "adjust", quantity: Math.abs(m.item.diffQty),
-          beforeStock: m.item.systemQty, afterStock: m.item.countedQty, unitCost: m.prod.costPrice,
-          reason: `Kiểm kê ${take.code}`, refCode: take.code, partner: "", note: `Kiểm kê ${take.code}`, actor: actorName,
+          beforeStock: m.before, afterStock: m.after, unitCost: m.prod.costPrice,
+          reason: `Kiểm kê ${take.code}`, refCode: take.code, partner: "",
+          note: `Kiểm kê ${take.code}: đếm ${m.item.countedQty}, sổ lúc đếm ${m.item.systemQty}, sổ lúc chốt ${m.before}, điều chỉnh ${m.item.diffQty > 0 ? "+" : ""}${m.item.diffQty}`,
+          actor: actorName,
         })),
-        ...movData.map((m) => db.insert(schema.auditLogs).values({ actor: actorName, action: "close_stocktake_adjust", entity: "product", entityId: m.prod.id, details: JSON.stringify({ stocktakeCode: take.code, sku: m.prod.sku, systemQty: m.item.systemQty, countedQty: m.item.countedQty }) })),
+        ...movData.map((m) => db.insert(schema.auditLogs).values({ actor: actorName, action: "close_stocktake_adjust", entity: "product", entityId: m.prod.id, details: JSON.stringify({ stocktakeCode: take.code, sku: m.prod.sku, systemQtyAtCount: m.item.systemQty, systemQtyAtClose: m.before, countedQty: m.item.countedQty, appliedDiff: m.item.diffQty }) })),
         db.update(schema.stocktakes).set({ status: "closed", closedAt: new Date() }).where(eq(schema.stocktakes.id, take.id)),
       ]);
       await writeAudit(db, actorName, "close_stocktake", "stocktake", take.id, { code: take.code, diffCount: diffItems.length });
@@ -1896,8 +2127,12 @@ export const Actions = {
     response: z.object({ ok: z.boolean(), imported: z.number(), errors: z.array(z.object({ line: z.number(), error: z.string() })) }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
-      const actor = await resolveActor(db, args.actorToken);
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) return { ok: false, imported: 0, errors: [{ line: 1, error: auth.error }] };
+      const actor = auth.actor;
       const actorName = actorNameOf(actor);
+      const roleErr = requireRole(actor, ROLE_ADMIN_STOREKEEPER, "Chỉ quản trị viên hoặc thủ kho được nhập sản phẩm từ CSV.");
+      if (roleErr) return { ok: false, imported: 0, errors: [{ line: 1, error: roleErr }] };
       // Tách một dòng CSV, hỗ trợ dấu phẩy trong ngoặc kép ("...") và "" thoát.
       const parseCsvLine = (line: string): string[] => {
         const out: string[] = [];
@@ -2005,7 +2240,7 @@ export const Actions = {
 
   getReports: defineAction({
     description: "Báo cáo doanh thu/lợi nhuận 30 ngày gần nhất (mặc định). Cách tính: doanh thu = tổng tiền các đơn completed/partially_returned/returned trong khoảng ngày (theo ngày tạo đơn) trừ phần đã trả lại; giá vốn = tổng costPrice từng dòng (đã trừ phần trả); lợi nhuận = doanh thu − giá vốn. Công nợ quá hạn tính theo dueDate.",
-    request: z.object({ from: z.string().default(""), to: z.string().default("") }),
+    request: z.object({ actorToken: z.string().optional(), from: z.string().default(""), to: z.string().default("") }),
     response: z.object({
       revenueByDay: z.array(z.object({ date: z.string(), revenue: z.number(), cost: z.number(), profit: z.number() })),
       topProducts: z.array(z.object({ productId: z.number(), sku: z.string(), name: z.string(), qty: z.number(), revenue: z.number(), profit: z.number() })),
@@ -2015,6 +2250,8 @@ export const Actions = {
     }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
+      const auth = await requireAuth(db, args.actorToken);
+      if (!auth.ok) throw new Error(auth.error);
       const now = new Date();
       const toRaw = args.to.trim() ? new Date(args.to.trim()) : now;
       const to = Number.isNaN(toRaw.getTime()) ? now : toRaw;

@@ -264,7 +264,7 @@ function ProductForm({ product, categories, token, isAdmin, onClose }: { product
   const [priceReason, setPriceReason] = useState("");
   const priceHistoryQ = useQuery({
     queryKey: ["priceHistory", product?.id],
-    queryFn: () => api.listPriceHistory({ productId: product!.id }),
+    queryFn: () => api.listPriceHistory({ productId: product!.id, actorToken: token || undefined }),
     enabled: !!product && showPriceHistory,
   });
 
@@ -749,7 +749,7 @@ function ReturnModal({ order, token, onClose }: { order: Order; token: string; o
 }
 
 /* ---------------- Supplier Form ---------------- */
-function SupplierForm({ supplier, onClose }: { supplier: Supplier | null; onClose: () => void }) {
+function SupplierForm({ supplier, token, onClose }: { supplier: Supplier | null; token: string; onClose: () => void }) {
   const qc = useQueryClient();
   const [name, setName] = useState(supplier?.name ?? "");
   const [contactPerson, setContactPerson] = useState(supplier?.contactPerson ?? "");
@@ -759,7 +759,7 @@ function SupplierForm({ supplier, onClose }: { supplier: Supplier | null; onClos
   const [notes, setNotes] = useState(supplier?.notes ?? "");
   const [error, setError] = useState("");
   const mut = useMutation({
-    mutationFn: () => supplier ? api.updateSupplier({ id: supplier.id, name, contactPerson, phone, email, address, notes }) : api.createSupplier({ name, contactPerson, phone, email, address, notes }),
+    mutationFn: () => supplier ? api.updateSupplier({ id: supplier.id, name, contactPerson, phone, email, address, notes, actorToken: token || undefined }) : api.createSupplier({ name, contactPerson, phone, email, address, notes, actorToken: token || undefined }),
     onSuccess: () => { qc.invalidateQueries(); onClose(); },
     onError: (e) => setError(netErrMsg(e)),
   });
@@ -780,10 +780,10 @@ function SupplierForm({ supplier, onClose }: { supplier: Supplier | null; onClos
 }
 
 /* ---------------- Tab Báo cáo ---------------- */
-function ReportsTab() {
+function ReportsTab({ token }: { token: string }) {
   const [from, setFrom] = useState(daysAgoStr(29));
   const [to, setTo] = useState(todayStr());
-  const q = useQuery({ queryKey: ["reports", from, to], queryFn: () => api.getReports({ from, to }) });
+  const q = useQuery({ queryKey: ["reports", from, to], queryFn: () => api.getReports({ from, to, actorToken: token || undefined }) });
   const r = q.data;
   return (
     <section aria-label="Báo cáo">
@@ -851,7 +851,7 @@ function DebtsTab({ token }: { token: string }) {
   const [payMethod, setPayMethod] = useState("Tiền mặt");
   const [payNote, setPayNote] = useState("");
   const [msg, setMsg] = useState("");
-  const q = useQuery({ queryKey: ["debts", kind], queryFn: () => api.listDebts({ kind }) });
+  const q = useQuery({ queryKey: ["debts", kind], queryFn: () => api.listDebts({ kind, actorToken: token || undefined }) });
   const debts = q.data?.debts ?? [];
   const today = todayStr();
   const payMut = useMutation({
@@ -886,10 +886,10 @@ function DebtsTab({ token }: { token: string }) {
                   <p className="text-[13px] text-[var(--dim)]">{d.kind === "receivable" ? "Phải thu" : "Phải trả"}{d.refCode ? ` · ${d.refCode}` : ""}{d.dueDate ? ` · Hạn: ${fmtDay(d.dueDate)}` : ""}</p>
                   {d.note && <p className="text-[13px] text-[var(--dim)]">{d.note}</p>}
                 </div>
-                <span className={`shrink-0 text-xs font-bold px-2.5 py-1 rounded-full ${d.status === "paid" ? "bg-[var(--green-soft)] text-[var(--green)]" : overdue ? "bg-[var(--red-soft)] text-[var(--red)]" : "bg-[var(--amber-soft)] text-[var(--amber)]"}`}>{d.status === "paid" ? "Đã trả đủ" : overdue ? "⚠ Quá hạn" : "Còn nợ"}</span>
+                <span className={`shrink-0 text-xs font-bold px-2.5 py-1 rounded-full ${d.status === "paid" ? "bg-[var(--green-soft)] text-[var(--green)]" : d.status === "cancelled" ? "bg-[var(--surface2)] text-[var(--dim)]" : overdue ? "bg-[var(--red-soft)] text-[var(--red)]" : "bg-[var(--amber-soft)] text-[var(--amber)]"}`}>{d.status === "paid" ? "Đã trả đủ" : d.status === "cancelled" ? "Đã hủy" : overdue ? "⚠ Quá hạn" : "Còn nợ"}</span>
               </div>
               <p className="mt-2 text-sm">Tổng: <b className="tabular">{fmtVND(d.totalAmount)}</b> · Đã trả: <span className="tabular">{fmtVND(d.paidAmount)}</span> · Còn lại: <b className="tabular">{fmtVND(d.remaining)}</b></p>
-              {d.status !== "paid" && (
+              {d.status !== "paid" && d.status !== "cancelled" && (
                 payDebtId === d.id ? (
                   <div className="mt-3 space-y-2 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3">
                     <div className="grid grid-cols-2 gap-2">
@@ -920,14 +920,14 @@ function StocktakesTab({ token, products, canStock, isAdmin }: { token: string; 
   const [note, setNote] = useState("");
   const [expanded, setExpanded] = useState<number | null>(null);
   const [msg, setMsg] = useState("");
-  const [closeResult, setCloseResult] = useState<{ id: number; diffs: { productSku: string; productName: string; systemQty: number; countedQty: number; diff: number }[] } | null>(null);
+  const [closeResult, setCloseResult] = useState<{ id: number; diffs: { productSku: string; productName: string; systemQty: number; countedQty: number; diff: number; systemQtyAtCount: number; systemQtyAtClose: number; appliedDiff: number }[] } | null>(null);
   const [reconDiffs, setReconDiffs] = useState<{ productId: number; sku: string; name: string; systemStock: number; calculatedStock: number; diff: number }[] | null>(null);
   const [reconApplied, setReconApplied] = useState(false);
   const [addProductId, setAddProductId] = useState(products[0]?.id ?? 0);
   const [addQty, setAddQty] = useState("");
   const [addNote, setAddNote] = useState("");
   const [editQty, setEditQty] = useState<Record<number, string>>({});
-  const q = useQuery({ queryKey: ["stocktakes"], queryFn: () => api.listStocktakes({}) });
+  const q = useQuery({ queryKey: ["stocktakes"], queryFn: () => api.listStocktakes({ actorToken: token || undefined }) });
   const createMut = useMutation({
     mutationFn: () => api.createStocktake({ note: note.trim(), actorToken: token || undefined }),
     onSuccess: (r) => { if (!r.ok) { setMsg(r.error ?? "Không tạo được đợt kiểm kê."); return; } setNote(""); setMsg(`Đã tạo đợt kiểm kê ${r.code}.`); qc.invalidateQueries(); },
@@ -1033,7 +1033,7 @@ function StocktakesTab({ token, products, canStock, isAdmin }: { token: string; 
                   {result && (
                     <div className="rounded-2xl bg-[var(--amber-soft)] p-3 mb-3">
                       <p className="font-bold text-sm mb-1">Chênh lệch sau khi chốt:</p>
-                      {result.length === 0 ? <p className="text-sm">Không có chênh lệch.</p> : result.map((d, i) => <p key={i} className="text-sm">· {d.productSku} {d.productName}: sổ {d.systemQty} → đếm {d.countedQty} (lệch {d.diff > 0 ? "+" : ""}{d.diff})</p>)}
+                      {result.length === 0 ? <p className="text-sm">Không có chênh lệch.</p> : result.map((d, i) => <p key={i} className="text-sm">· {d.productSku} {d.productName}: sổ lúc đếm {d.systemQtyAtCount} · đếm {d.countedQty} · sổ lúc chốt {d.systemQtyAtClose} · điều chỉnh {d.appliedDiff > 0 ? "+" : ""}{d.appliedDiff}</p>)}
                     </div>
                   )}
                   {st.status === "draft" && canStock && (
@@ -1052,11 +1052,11 @@ function StocktakesTab({ token, products, canStock, isAdmin }: { token: string; 
 }
 
 /* ---------------- Tab Lịch sử (audit log) ---------------- */
-function HistoryTab() {
+function HistoryTab({ token }: { token: string }) {
   const [actor, setActor] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
-  const q = useQuery({ queryKey: ["auditLogs", actor, from, to], queryFn: () => api.listAuditLogs({ actor, from, to, limit: 200 }) });
+  const q = useQuery({ queryKey: ["auditLogs", actor, from, to], queryFn: () => api.listAuditLogs({ actor, from, to, limit: 200, actorToken: token || undefined }) });
   const logs = q.data?.logs ?? [];
   function shortDetails(d: string): string {
     try {
@@ -1208,7 +1208,7 @@ function PendingRestockBox({ products, token }: { products: Product[]; token: st
   const qc = useQueryClient();
   const [sel, setSel] = useState<Record<number, string>>({});
   const [msg, setMsg] = useState("");
-  const q = useQuery({ queryKey: ["pendingRestocks"], queryFn: () => api.getPendingRestocks({}) });
+  const q = useQuery({ queryKey: ["pendingRestocks"], queryFn: () => api.getPendingRestocks({ actorToken: token || undefined }) });
   const mut = useMutation({
     mutationFn: (v: { id: number; productId?: number }) => api.resolvePendingRestock({ id: v.id, productId: v.productId, actorToken: token || undefined }),
     onSuccess: (r) => { if (!r.ok) { setMsg(r.error ?? "Không xử lý được."); return; } setMsg("Đã hoàn kho cho khoản chờ xử lý."); qc.invalidateQueries(); },
@@ -1353,43 +1353,13 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [staff]);
 
-  // Chặn toàn bộ app khi chưa đăng nhập; bắt buộc đổi PIN lần đầu.
-  if (!staff) {
-    return (
-      <LoginScreen
-        onLoggedIn={(t, s, pin) => {
-          sessionStorage.setItem("staffToken", t);
-          sessionStorage.setItem("staffInfo", JSON.stringify(s));
-          setLoginPin(pin);
-          setStaff(s);
-          setNeedPinChange(s.mustChangePin === 1);
-        }}
-      />
-    );
-  }
-  if (needPinChange) {
-    return (
-      <ChangePinScreen
-        token={token}
-        oldPin={loginPin}
-        onDone={() => {
-          const updated = { ...staff, mustChangePin: 0 };
-          sessionStorage.setItem("staffInfo", JSON.stringify(updated));
-          setStaff(updated);
-          setNeedPinChange(false);
-          setLoginPin("");
-        }}
-      />
-    );
-  }
-
-  const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: () => api.getDashboard({ actorToken: token || undefined }) });
-  const productsQ = useQuery({ queryKey: ["products", prodSearch, prodCat, prodStock], queryFn: () => api.listProducts({ search: prodSearch, category: prodCat, stockFilter: prodStock, actorToken: token || undefined }) });
-  const allProductsQ = useQuery({ queryKey: ["products-all"], queryFn: () => api.listProducts({ search: "", category: "", stockFilter: "all", actorToken: token || undefined }) });
-  const movementsQ = useQuery({ queryKey: ["movements", moveType, moveSearch], queryFn: () => api.listMovements({ type: moveType, search: moveSearch, limit: 200, actorToken: token || undefined }) });
-  const ordersQ = useQuery({ queryKey: ["orders", orderStatus, orderSearch], queryFn: () => api.listOrders({ status: orderStatus, search: orderSearch }) });
-  const suppliersQ = useQuery({ queryKey: ["suppliers", supplierSearch], queryFn: () => api.listSuppliers({ search: supplierSearch }) });
-  const categoriesQ = useQuery({ queryKey: ["categories"], queryFn: () => api.listCategories({}) });
+  const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: () => api.getDashboard({ actorToken: token || undefined }), enabled: !!staff && !needPinChange });
+  const productsQ = useQuery({ queryKey: ["products", prodSearch, prodCat, prodStock], queryFn: () => api.listProducts({ search: prodSearch, category: prodCat, stockFilter: prodStock, actorToken: token || undefined }), enabled: !!staff && !needPinChange });
+  const allProductsQ = useQuery({ queryKey: ["products-all"], queryFn: () => api.listProducts({ search: "", category: "", stockFilter: "all", actorToken: token || undefined }), enabled: !!staff && !needPinChange });
+  const movementsQ = useQuery({ queryKey: ["movements", moveType, moveSearch], queryFn: () => api.listMovements({ type: moveType, search: moveSearch, limit: 200, actorToken: token || undefined }), enabled: !!staff && !needPinChange });
+  const ordersQ = useQuery({ queryKey: ["orders", orderStatus, orderSearch], queryFn: () => api.listOrders({ status: orderStatus, search: orderSearch, actorToken: token || undefined }), enabled: !!staff && !needPinChange });
+  const suppliersQ = useQuery({ queryKey: ["suppliers", supplierSearch], queryFn: () => api.listSuppliers({ search: supplierSearch, actorToken: token || undefined }), enabled: !!staff && !needPinChange });
+  const categoriesQ = useQuery({ queryKey: ["categories"], queryFn: () => api.listCategories({ actorToken: token || undefined }), enabled: !!staff && !needPinChange });
 
   const allProducts = allProductsQ.data?.products ?? [];
   const categories = useMemo(() => allProductsQ.data?.categories ?? productsQ.data?.categories ?? [], [allProductsQ.data, productsQ.data]);
@@ -1397,8 +1367,8 @@ export function App() {
   const deleteMut = useMutation({
     mutationFn: async (c: { kind: string; id: number }) => {
       if (c.kind === "product") return api.deleteProduct({ id: c.id, actorToken: token || undefined });
-      if (c.kind === "supplier") return api.deleteSupplier({ id: c.id });
-      if (c.kind === "category") return api.deleteCategory({ id: c.id });
+      if (c.kind === "supplier") return api.deleteSupplier({ id: c.id, actorToken: token || undefined });
+      if (c.kind === "category") return api.deleteCategory({ id: c.id, actorToken: token || undefined });
       return api.deleteMovement({ id: c.id, actorToken: token || undefined });
     },
     onSuccess: (r) => {
@@ -1444,7 +1414,39 @@ export function App() {
     },
     onError: (e) => setCpErr(netErrMsg(e)),
   });
-  const addCatMut = useMutation({ mutationFn: () => api.createCategory({ name: newCatName }), onSuccess: (r) => { if (!r.ok) alertMsg(r.error ?? "Lỗi"); else setNewCatName(""); qc.invalidateQueries(); }, onError: (e) => alertMsg(netErrMsg(e)) });
+  const addCatMut = useMutation({ mutationFn: () => api.createCategory({ name: newCatName, actorToken: token || undefined }), onSuccess: (r) => { if (!r.ok) alertMsg(r.error ?? "Lỗi"); else setNewCatName(""); qc.invalidateQueries(); }, onError: (e) => alertMsg(netErrMsg(e)) });
+
+  // Chặn toàn bộ app khi chưa đăng nhập; bắt buộc đổi PIN lần đầu.
+  if (!staff) {
+    return (
+      <LoginScreen
+        onLoggedIn={(t, s, pin) => {
+          sessionStorage.setItem("staffToken", t);
+          sessionStorage.setItem("staffInfo", JSON.stringify(s));
+          setLoginPin(pin);
+          setStaff(s);
+          setNeedPinChange(s.mustChangePin === 1);
+        }}
+      />
+    );
+  }
+  if (needPinChange) {
+    return (
+      <ChangePinScreen
+        token={token}
+        oldPin={loginPin}
+        onDone={() => {
+          const updated = { ...staff, mustChangePin: 0 };
+          sessionStorage.setItem("staffInfo", JSON.stringify(updated));
+          setStaff(updated);
+          setNeedPinChange(false);
+          setLoginPin("");
+        }}
+      />
+    );
+  }
+
+
 
   const d = dashboard.data;
   const tabs: { key: Tab; label: string; icon: string }[] = [
@@ -1783,10 +1785,10 @@ export function App() {
           </section>
         )}
 
-        {tab === "reports" && <ReportsTab />}
+        {tab === "reports" && <ReportsTab token={token} />}
         {tab === "debts" && <DebtsTab token={token} />}
         {tab === "stocktakes" && <StocktakesTab token={token} products={allProducts} canStock={canStock} isAdmin={isAdmin} />}
-        {tab === "history" && <HistoryTab />}
+        {tab === "history" && <HistoryTab token={token} />}
         {tab === "admin" && isAdmin && <AdminTab token={token} staff={staff} />}
 
         {tab === "partners" && (
@@ -1861,7 +1863,7 @@ export function App() {
       {productForm.open && <Modal title={productForm.product ? "Sửa sản phẩm" : "Thêm sản phẩm mới"} onClose={() => setProductForm({ open: false, product: null })}><ProductForm product={productForm.product} categories={categories.length ? categories : ["Bồn cầu", "Lavabo & Chậu rửa", "Vòi lavabo", "Sen tắm & Vòi sen", "Bồn tắm", "Khác"]} token={token} isAdmin={isAdmin} onClose={() => setProductForm({ open: false, product: null })} /></Modal>}
       {moveForm.open && <Modal title="Phiếu nhập / xuất / kiểm kê" onClose={() => setMoveForm({ ...moveForm, open: false })}><MovementForm presetType={moveForm.type} presetProductId={moveForm.productId} products={allProducts} suppliers={suppliersQ.data?.suppliers ?? []} token={token} canStock={canStock} onClose={() => setMoveForm({ ...moveForm, open: false })} /></Modal>}
       {orderFormOpen && <Modal title="Tạo đơn hàng mới" onClose={() => setOrderFormOpen(false)}><OrderForm products={allProducts} token={token} onClose={() => setOrderFormOpen(false)} /></Modal>}
-      {supplierForm.open && <Modal title={supplierForm.supplier ? "Sửa nhà cung cấp" : "Thêm nhà cung cấp"} onClose={() => setSupplierForm({ open: false, supplier: null })}><SupplierForm supplier={supplierForm.supplier} onClose={() => setSupplierForm({ open: false, supplier: null })} /></Modal>}
+      {supplierForm.open && <Modal title={supplierForm.supplier ? "Sửa nhà cung cấp" : "Thêm nhà cung cấp"} onClose={() => setSupplierForm({ open: false, supplier: null })}><SupplierForm supplier={supplierForm.supplier} token={token} onClose={() => setSupplierForm({ open: false, supplier: null })} /></Modal>}
       {returnOrder && <Modal title={`Trả hàng — ${returnOrder.orderCode}`} onClose={() => setReturnOrder(null)}><ReturnModal order={returnOrder} token={token} onClose={() => setReturnOrder(null)} /></Modal>}
       {printData && <PrintPreview data={printData} onClose={() => setPrintData(null)} />}
 

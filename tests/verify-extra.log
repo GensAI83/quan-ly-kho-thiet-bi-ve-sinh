@@ -1,0 +1,38 @@
+  [PASS] A1 đủ 17 bảng sau 0001->0004 (17: audit_logs,backups,categories,debt_payments,debts,idempotency_keys,movements,order_items,orders,pending_restocks,price_history,products,staff,staff_sessions,stocktake_items,stocktakes,suppliers)
+  [PASS] A2 staff có failed_attempts + locked_until id,name,role,pin_hash,pin_salt,active,must_change_pin,created_at,failed_attempts,locked_until
+  [PASS] A3 debts.status nhận giá trị 'cancelled' (không CHECK enum) 
+  [PASS] A4 file 0004 tồn tại 
+  [PASS] B1 đăng nhập admin mặc định, mustChangePin=1 {"id":1,"name":"Chủ cửa hàng","role":"admin","mustChangePin":1}
+  [PASS] B2 đổi PIN 123456 -> 654321 {"ok":true,"error":null}
+  [PASS] B3 PIN cũ không đăng nhập được nữa {"ok":false,"token":"","error":"Mã PIN không đúng.","staff":null}
+  [PASS] B4 PIN mới đăng nhập được, mustChangePin=0 {"id":1,"name":"Chủ cửa hàng","role":"admin","mustChangePin":0}
+  [PASS] C0 hoàn thành đơn trước khi ngưng bán {"ok":true,"error":null,"pendingRestocks":[]}
+  [PASS] C1 sản phẩm hết tồn + có lịch sử -> chuyển ngưng bán {"ok":true,"error":null,"discontinued":true}
+  [PASS] C2 hủy đơn: khoản chờ hoàn kho 2 (net) + báo pendingRestocks {"cancel":{"ok":true,"error":null,"pendingRestocks":[{"productName":"SP Ngưng","quantity":2}]},"pend":[{"id":1,"orderCode":"DH20261109-7801","productId":1,"productSku":"BC-0643","productName":"SP Ngưng","quantity":2,"unitPrice":100,"reason":"Sản phẩm đã bị xóa/ngưng khi hủy đơn","status":"pending","createdAt":"2026-11-09T10:11:13.341Z","resolvedAt":null}]}
+  [PASS] D1 thủ kho nhập CSV: 2 dòng vào, 1 dòng lỗi SKU trùng {"ok":false,"imported":2,"errors":[{"line":4,"error":"Mã SKU \"BC-001\" đã tồn tại."}]}
+  [PASS] D2 sales nhập CSV phải lỗi phân quyền {"ok":false,"imported":0,"errors":[{"line":1,"error":"Chỉ quản trị viên hoặc thủ kho được nhập sản phẩm từ CSV."}]}
+  [PASS] E1 sales tạo phiếu batch phải lỗi {"ok":false,"error":"Chỉ quản trị viên hoặc thủ kho được tạo phiếu nhập/xuất.","refCode":"","results":[]}
+  [PASS] E2 sales xóa phiếu phải lỗi phân quyền (trước cả kiểm tra tồn tại) {"ok":false,"error":"Chỉ quản trị viên hoặc thủ kho được xoá phiếu."}
+  [PASS] E3 sales tạo đợt kiểm kê phải lỗi {"ok":false,"id":0,"code":"","error":"Chỉ quản trị viên hoặc thủ kho được tạo đợt kiểm kê."}
+  [PASS] E4 thủ kho tạo đợt kiểm kê được {"ok":true,"id":1,"code":"KK20261109-3637","error":null}
+  [PASS] E5 sales tạo nhà cung cấp phải lỗi {"__thrown":true,"error":"Chỉ quản trị viên hoặc thủ kho được quản lý nhà cung cấp."}
+  [PASS] E6 thủ kho tạo nhà cung cấp được {"ok":true,"id":1}
+  [PASS] E7 thủ kho đối chiếu apply phải lỗi (chỉ admin) {"ok":false,"error":"Chỉ quản trị viên được áp dụng đối chiếu tồn kho.","applied":false,"diffs":[]}
+  [PASS] E8 sales xuất sao lưu phải lỗi (chỉ admin) {"ok":false,"data":"","error":"Chỉ quản trị viên được xuất sao lưu.","note":"Sao lưu không bao gồm mã PIN của nhân viên. Khi khôi phục, nhân viên đã có sẽ giữ nguyên mã PIN hiện tại; nhân viên mới trong bản sao lưu sẽ được đặt mã PIN mặc định 123456 và bắt buộc đổi PIN khi đăng nhập lần đầu."}
+  [PASS] E9 thủ kho xuất sao lưu phải lỗi (chỉ admin) {"ok":false,"data":"","error":"Chỉ quản trị viên được xuất sao lưu.","note":"Sao lưu không bao gồm mã PIN của nhân viên. Khi khôi phục, nhân viên đã có sẽ giữ nguyên mã PIN hiện tại; nhân viên mới trong bản sao lưu sẽ được đặt mã PIN mặc định 123456 và bắt buộc đổi PIN khi đăng nhập lần đầu."}
+  [PASS] E10 thủ kho tạo snapshot sao lưu được {"ok":true,"id":1,"size":3575,"error":null}
+  [PASS] E11 sales khôi phục backup phải lỗi {"ok":false,"error":"Chỉ quản trị viên được khôi phục dữ liệu."}
+  [PASS] E12 admin khôi phục backup được {"ok":true,"error":null}
+  [PASS] E13 listDebts không token phải lỗi {"__thrown":true,"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] E13 listStocktakes không token phải lỗi {"__thrown":true,"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] E13 getPendingRestocks không token phải lỗi {"__thrown":true,"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] E13 listPriceHistory không token phải lỗi {"__thrown":true,"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] E13 listAuditLogs không token phải lỗi {"__thrown":true,"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] E13 listBackups không token phải lỗi {"__thrown":true,"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] E13 getReports không token phải lỗi {"__thrown":true,"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] E13 listSuppliers không token phải lỗi {"__thrown":true,"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] E13 listCategories không token phải lỗi {"__thrown":true,"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] E13 listOrders không token phải lỗi {"__thrown":true,"error":"Cần đăng nhập để thực hiện thao tác này."}
+  [PASS] E13 listMovements không token phải lỗi {"__thrown":true,"error":"Cần đăng nhập để thực hiện thao tác này."}
+
+KIỂM CHỨNG PHỤ: 36 PASS, 0 FAIL
