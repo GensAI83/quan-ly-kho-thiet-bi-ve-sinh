@@ -15,6 +15,13 @@
       "when": 1794196992818,
       "tag": "0002_warehouse_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794213942197,
+      "tag": "0003_stock_safety_and_ops",
+      "breakpoints": true
     }
   ]
 }
