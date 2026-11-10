@@ -11,6 +11,11 @@ phân quyền đầy đủ). Log đầy đủ: `tests/repro-before-fix.log`, `te
 `tests/repro-4-after-fix.log`, kiểm chứng phụ `tests/verify-extra-4.ts` /
 `tests/verify-extra-4.log`. Kết quả đợt 2 ở mục E–G bên dưới.
 
+Đợt 3 (ngày 2026-11-10): sửa 2 lỗi mới (xem `CHANGES.md` mục "Sửa 2 lỗi — đợt 3").
+Harness mới `bun tests/repro-2-bugs-round3.ts`, log `tests/repro-2-before-fix.log` /
+`tests/repro-2-after-fix.log`. Kết quả đợt 3 ở mục H bên dưới; các bước kiểm tra trên
+trình duyệt thật cho đợt 3 bổ sung ở mục G.
+
 Quy ước cột Kết quả:
 - **Đạt** — đã chạy và đúng.
 - **Đạt (mức code)** — đã chạy bằng harness/kiểm chứng phụ trên SQLite trong bộ nhớ, chưa chạy
@@ -124,7 +129,7 @@ Số liệu kiểm chứng trong harness (đúng kịch bản đã báo):
 
 | Mục | Kết quả | Ghi chú |
 |---|---|---|
-| Giữ hàng → tồn giảm, "Đang giữ X" → hủy giữ → tồn hoàn, "Đang giữ" về 0 | Chưa chạy được | Cần trình duyệt thật. `releaseReservation` đợt này chỉ thêm void công nợ + yêu cầu đăng nhập; chưa có harness riêng cho luồng giữ/hủy giữ. |
+| Giữ hàng → tồn giảm, "Đang giữ X" → hủy giữ → tồn hoàn, "Đang giữ" về 0 | Đạt (mức code) | Harness đợt 3 mục 2f: huỷ giữ đơn reserved 2 dòng cùng SP → tồn 7 → 10, số lượng giữ 3 → 0, đúng 1 phiếu hoàn. Thao tác trên trình duyệt thật chưa chạy. |
 | Tạo đơn → cọc một phần → "Cọc một phần", công nợ giảm → giao hàng → hoàn thành → công nợ còn lại đúng | Đạt (mức code, một phần) | Harness 4a2: cọc 40 rồi hủy đơn (đồng bộ cọc/công nợ đúng). Giao hàng/hoàn thành trên giao diện chưa chạy. |
 | Trả hàng 1 phần → tồn tăng 1, "Trả một phần", công nợ giảm; trả tiếp quá số đã giao → chặn | Đạt (mức code) | Harness nhóm 3: trả 1, trả tiếp được, trả quá bị chặn (3ii-a2). Hiển thị công nợ trên giao diện chưa chạy. |
 | Phiếu nhập nhiều mặt hàng: 1 phiếu 3 dòng → 1 mã PN chung, tồn cả 3 tăng đúng; 1 dòng sai → cả phiếu không ghi | Chưa chạy được | Cần trình duyệt thật. Logic batch không đổi đợt này; sales tạo batch bị chặn đã kiểm chứng (E1). |
@@ -221,4 +226,43 @@ bán hàng thật.
 | 2 máy/2 tab cùng xác nhận 1 đơn chờ → chỉ trừ tồn 1 lần, chỉ 1 phiếu xuất | Chưa chạy được | Cần 2 máy/tab thật. Mức code: harness 4c (2 lần xác nhận cùng lúc → trừ 1 lần). |
 | 2 máy/2 tab cùng chốt 1 phiếu kiểm kê → chỉ 1 lần chốt có hiệu lực, không điều chỉnh trùng | Chưa chạy được | Cần 2 máy/tab thật. Mức code: chỉ có chốt lại TUẦN TỰ (1d/1e); chốt đồng thời 2 tab vẫn là cửa sổ lỗi còn lại (xem `CHANGES.md`). |
 | Mất mạng ngay khi bấm "Trả hàng"/"Thu nợ" → tiền cọc/công nợ không đổi, bấm lại sau khi có mạng thì đúng | Chưa chạy được | Cần trình duyệt thật. Mức code: harness nhóm 2 (cọc chỉ tăng khi thu tiền thật). |
+| Trả một phần rồi thu đủ trên trình duyệt thật (đợt 3): màn hình Đơn hàng hiển thị "Còn phải thu" 0đ, nút "Ghi nhận cọc" gợi ý đúng số còn lại | Chưa chạy được | Cần trình duyệt thật (xem `TESTING.md` mục 7d). Mức code: harness đợt 3 nhóm 1 (1a/1b/1c) — công thức client đã trừ tiền hoàn hàng. |
+| Tạo đơn 2 dòng cùng SP rồi ngắt mạng lúc xác nhận (đợt 3): tồn tự về đúng, không phiếu/đơn mồ côi, không bản ghi sửa chữa | Chưa chạy được | Cần trình duyệt thật + ngắt mạng thật (xem `TESTING.md` mục 7d). Mức code: harness đợt 3 nhóm 2 (2a/2c) — tồn về đúng 10, 0 phiếu xuất, 0 bản ghi sửa chữa. |
 | Sau các thao tác trên: Đối chiếu tồn kho → không lệch; nếu lệch thì có bản ghi sửa chữa trong Chờ hoàn kho | Chưa chạy được | Cần làm tại cửa hàng sau khi chạy các mục trên. |
+
+## H. Đợt 3 — Harness tái hiện 2 lỗi (`bun tests/repro-2-bugs-round3.ts`)
+
+| Nhóm | Trước sửa | Sau sửa |
+|---|---|---|
+| 1 — Trả một phần rồi thanh toán đủ: Còn phải thu ở client | 0/3 PASS | **3/3 PASS** |
+| 2 — Nhiều dòng cùng sản phẩm: hoàn tồn khi gặp lỗi | 0/8 PASS | **9/9 PASS** |
+| **Tổng** | **0 PASS / 11 FAIL** | **12 PASS / 0 FAIL** |
+
+Lưu ý trung thực: log trước sửa có 11 kiểm tra, log sau sửa có 12 — kiểm tra 2f (huỷ giữ đơn
+reserved 2 dòng cùng SP, thêm cùng lúc với bản sửa `releaseReservation`) không có trong lần
+chạy trước sửa; hành vi lỗi của nó trước sửa suy ra từ cùng cơ chế xung đột version đã chứng
+minh ở 2d-3/2d-4. Harness cũ chạy lại sau đợt 3: đợt 2 **18/18 PASS**, đợt 1 **42/42 PASS**
+(không hồi quy). `bun run typecheck` 0 lỗi; `bun run build:server` thành công
+(`server/dist/actions.js` 0,35 MB). Không có migration mới.
+
+Số liệu kiểm chứng trong harness (đúng kịch bản đã báo):
+- Lỗi 1: đơn 100đ (60đ + 40đ), trả một phần 40đ, thu đủ 60đ còn lại → client hiển thị
+  "Còn phải thu" **0đ** (trước sửa: 40đ), `paymentStatus` `paid`, công nợ còn 0 (server đã
+  đúng từ đợt 2 — chỉ client sai); trả 40đ rồi bấm "Ghi nhận cọc" → số tiền gợi ý **60đ**
+  (trước sửa: 100đ); kiểm tra tĩnh: dòng tính `remaining` trong `App.tsx` có trừ tiền hoàn.
+- Lỗi 2: đơn confirmed 2 dòng cùng SP (×2 và ×1), tồn 10, tiêm lỗi ghi sau khi trừ tồn →
+  đơn thất bại, tồn về đúng **10**, 0 phiếu xuất, 0 đơn, 0 bản ghi sửa chữa (trước sửa: tồn
+  kẹt ở 8, 1 bản ghi sửa chữa); cùng kịch bản nhưng đơn thành công → tồn **7**, đúng **1 phiếu
+  xuất** (số lượng 3, before 10 → after 7), đơn đủ 2 dòng (trước sửa: 2 phiếu xuất 2/1);
+  xác nhận đơn pending 2 dòng cùng SP + lỗi ghi → tồn về đúng 10, đơn vẫn pending, 0 phiếu
+  xuất, 0 bản ghi sửa chữa (trước sửa: tồn kẹt ở 8); phiếu batch 2 dòng cùng SP + lỗi ghi →
+  tồn về đúng 10, 0 phiếu, 0 bản ghi sửa chữa (trước sửa: tồn kẹt ở 8), và khi thành công →
+  tồn 7, đúng 1 phiếu (số lượng 3, before 10 → after 7), `results` 1 sản phẩm (trước sửa:
+  2 phiếu, `results` 2 dòng); trả hàng 2 dòng cùng SP + lỗi ghi → lỗi đúng là lỗi ghi đã
+  tiêm, tồn về đúng 7, đã trả vẫn 0, 0 phiếu nhập trả, 0 bản ghi sửa chữa — và khi thành công
+  → tồn 9, đúng 1 phiếu nhập (số lượng 2, before 7 → after 9), mỗi dòng đã trả 1 (trước sửa:
+  trả hàng 2 dòng cùng SP lỗi xung đột version ngay ở lần áp thứ 2, cả khi không tiêm lỗi);
+  chen ngang đổi tồn giữa lúc áp và lúc bù → đơn lỗi nêu rõ "đối chiếu tồn kho", đúng **1 bản
+  ghi sửa chữa** với fixQty **3** (= 10 − 7, đúng tuyệt đối), tồn giữ nguyên 7 không ghi đè
+  (trước sửa: 2 bản sửa chữa, fixQty 2 và 1); huỷ giữ đơn reserved 2 dòng cùng SP → tồn về
+  10, `reservedQty` 0, đúng 1 phiếu hoàn (số lượng 3, before 7 → after 10), đơn đã huỷ.

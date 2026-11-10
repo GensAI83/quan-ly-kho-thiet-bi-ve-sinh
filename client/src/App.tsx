@@ -1712,7 +1712,12 @@ export function App() {
               {ordersQ.data?.orders.map((o) => {
                 const st = ORDER_STATUS[o.status] ?? ORDER_STATUS.pending!;
                 const expanded = expandedOrder === o.id;
-                const remaining = Math.max(0, o.totalAmount - o.depositAmount);
+                // Còn phải thu = tổng đơn − tiền hàng đã trả − tiền đã cọc
+                // (netPayable − cọc, khớp paymentStatus/công nợ ở server).
+                // Công thức cũ (tổng − cọc) không trừ tiền hoàn hàng nên đơn trả
+                // một phần rồi thu đủ vẫn hiển thị còn nợ.
+                const refunded = o.items.reduce((s, i) => s + (i.returnedQty || 0) * i.unitPrice, 0);
+                const remaining = Math.max(0, o.totalAmount - refunded - o.depositAmount);
                 return (
                   <li key={o.id} className="rounded-2xl bg-[var(--surface)] border border-[var(--border)] p-4">
                     <button aria-label={`Xem chi tiết đơn ${o.orderCode}`} className="w-full text-left" onClick={() => setExpandedOrder(expanded ? null : o.id)}>

@@ -1,4 +1,100 @@
-# CHANGES.md — Nhật ký thay đổi (bản nâng cấp 2026-11-09, đợt 2 ngày 2026-11-10)
+# CHANGES.md — Nhật ký thay đổi (bản nâng cấp 2026-11-09, đợt 2 ngày 2026-11-10, đợt 3 ngày 2026-11-10)
+
+## Sửa 2 lỗi — đợt 3 (ngày 2026-11-10) — xem `TEST_RESULTS.md` mục H
+
+Harness tái hiện mới: `tests/repro-2-bugs-round3.ts` (`bun tests/repro-2-bugs-round3.ts`, Bun + SQLite
+trong bộ nhớ, không sửa `tests/repro-4-bugs.ts` và `tests/repro-5-bugs.ts`). Trước sửa: **0 PASS / 11 FAIL**
+(log ở `tests/repro-2-before-fix.log`); sau sửa: **12 PASS / 0 FAIL** (log ở
+`tests/repro-2-after-fix.log`). Harness cũ chạy lại: đợt 2 **18/18 PASS**, đợt 1 **42/42 PASS** (không hồi quy).
+Không có migration mới (không cần đổi schema).
+
+Lưu ý trung thực: log trước sửa có 11 kiểm tra, log sau sửa có 12 — kiểm tra 2f (huỷ giữ đơn reserved
+2 dòng cùng SP) được thêm cùng lúc với bản sửa cho `releaseReservation` (xem dưới) nên không có
+trong lần chạy trước sửa; hành vi lỗi của nó trước sửa suy ra từ cùng cơ chế xung đột version
+đã chứng minh ở 2d-3/2d-4 (cùng vòng lặp áp tồn theo dòng).
+
+### Lỗi 1 — Trả một phần rồi thanh toán đủ, màn hình Đơn hàng vẫn báo còn nợ
+(gốc: server đã đúng từ đợt 2 — `netPayable = totalAmount − refundedTotal`, `paymentStatus` tính
+theo `netPayable`, tab Công nợ dùng `d.remaining` từ server — nhưng client tính "Còn phải thu"
+theo công thức cũ không trừ tiền hoàn hàng)
+
+- Vị trí duy nhất sửa: `client/src/App.tsx` dòng 1715 (tab Đơn hàng). Đã xác minh shape:
+  `orderItemShape` trong `server/src/actions.ts` có `returnedQty` và `unitPrice`,
+  `toOrderItem`/`listOrders` trả đủ cả hai trường (giao diện đã hiển thị `(đã trả ${i.returnedQty})`
+  và dùng `i.unitPrice` khi in phiếu) — không cần sửa server cho lỗi này.
+- Sửa: tính `refunded = o.items.reduce((s, i) => s + (i.returnedQty || 0) * i.unitPrice, 0)` rồi
+  `remaining = Math.max(0, o.totalAmount - refunded - o.depositAmount)`. Số này vừa hiển thị
+  "Còn phải thu" (dòng ~1744) vừa điền trước khi bấm "Ghi nhận cọc" (dòng ~1757).
+- Rà soát toàn bộ `App.tsx` (grep `totalAmount - ` và `remaining`): không còn chỗ nào khác tính
+  "còn phải thu"/"còn lại" cho đơn hàng theo tổng gốc. Dòng ~697 là form tạo đơn mới — đơn chưa
+  có hàng trả nên giữ nguyên `total − cọc`. Tab Công nợ dùng `d.remaining` từ server — giữ nguyên.
+
+### Lỗi 2 — Đơn có nhiều dòng cùng sản phẩm vẫn hoàn tồn thiếu khi gặp lỗi
+(gốc: `compensateStock` dùng guard version là ĐÚNG — không sửa; vấn đề là các vòng lặp trừ kho
+duyệt theo từng dòng và gọi `applyStock` riêng cho mỗi dòng: 2 dòng cùng SP ×2 và ×1 trên tồn 10
+tạo applied = [A1(before 10, after 8, afterVersion 6), A2(before 8, after 7, afterVersion 7)];
+khi bù ngược, A2 khớp v7 → tồn về 8 (v8), A1 cần v6 nhưng hiện tại là v8 → bù thất bại, tồn kẹt ở 8.
+Phát hiện thêm khi tái hiện: `createReturn` 2 dòng cùng SP lỗi NGAY CẢ KHI KHÔNG tiêm lỗi —
+lần áp thứ 2 xung đột version vì 2 đối tượng sản phẩm đọc riêng đều mang version cũ.)
+
+- Cách sửa chung (áp dụng cho MỌI vòng lặp `applyStock` duyệt theo dòng): **GỘP THEO SẢN PHẨM
+  trước khi trừ kho** — mỗi sản phẩm chỉ đúng 1 lần `applyStock` trong một thao tác. Movement
+  cũng gộp theo sản phẩm (1 phiếu cho 1 sản phẩm, số lượng = tổng, before = tồn trước thao tác,
+  after = tồn sau). `orderItems` vẫn giữ nguyên từng dòng (không gộp dòng trên đơn).
+- `createOrder`: vòng lặp trừ kho dùng `qtyByProduct` (đã có sẵn từ bước validate); `unitCost`
+  lấy theo sản phẩm (dòng đầu tiên của sản phẩm đó).
+- `updateOrderStatus`:
+  - confirmed → reserved: cộng `reservedQty` theo dòng → gộp: `reservedQty +=` tổng số lượng của SP.
+  - pending → reserved: trừ kho + cộng giữ theo dòng → gộp theo `qtyByProduct` (đã có sẵn ở nhánh này).
+  - reserved → confirm/delivering/completed: trừ `reservedQty` theo dòng → gộp: `reservedQty −=`
+    tổng số lượng của SP.
+  - pending → confirm/delivering/completed: trừ kho theo dòng → gộp theo `qtyByProduct` (đã có sẵn).
+    Movements gộp theo sản phẩm.
+  - Hủy đơn / bỏ giữ: gộp `netQty` (phần chưa trả) theo sản phẩm; `afterReserved` khi là đơn
+    reserved dùng TỔNG số lượng giữ của sản phẩm (sum `quantity`), không dùng netQty. 2 dòng cùng
+    SP nhưng 1 dòng đã trả hết (netQty 0) và 1 dòng chưa trả → gộp đúng tổng netQty.
+    `pendingRestocks` cho sản phẩm ngưng bán ghi 1 lần theo tổng netQty của sản phẩm (không ghi trùng).
+- `createMovementBatch`: gộp theo `productId` (tổng quantity). Movement gộp dùng reason/partner/
+  note/unitCost của dòng đầu tiên của sản phẩm đó. `results` trả về theo sản phẩm (đã gộp).
+- `createReturn`: gộp theo `productId` (tổng qty). Cập nhật `returnedQty` vẫn theo từng orderItem
+  (giữ nguyên code hiện tại, tách khỏi phần áp tồn). Movement gộp theo sản phẩm (unitCost lấy dòng
+  đầu). `refundTotal` tính từ `lineItems` — giữ nguyên.
+- `closeStocktake`: gộp phòng thủ theo `productId`, cộng dồn `diffQty`. Lưu ý: bảng
+  `stocktake_items` KHÔNG có unique constraint trên (stocktakeId, productId), nhưng
+  `saveStocktakeItem` upsert theo (stocktakeId, productId) nên thực tế không trùng dòng.
+  Kiểm tra "đã có phiếu adjust" và `diffs` hiển thị vẫn theo sản phẩm (metadata của dòng đầu,
+  `appliedDiff` = tổng diffQty).
+- Thêm ngoài danh sách 5 chỗ trên (cùng mẫu lỗi, phát hiện khi rà soát toàn bộ `applyStock`):
+  `releaseReservation` cũng duyệt theo dòng — đã gộp theo sản phẩm (`reservedQty −=` tổng số
+  lượng giữ của SP, 1 phiếu hoàn gộp); kiểm tra 2f trong harness mới bao phủ luồng này.
+- KHÔNG sửa: `compensateStock` (guard version đúng, giữ nguyên); `createMovement`, `deleteMovement`,
+  `reconcileStock`, `resolvePendingRestock` — mỗi lần chỉ 1 sản phẩm, không có vòng lặp theo dòng.
+- Hệ quả: sau khi gộp, `recordCompensationFailure` tính `fixQty = beforeStock − afterStock` trở
+  thành đúng tuyệt đối cho từng sản phẩm (trước đây sai khi có 2 lần áp cùng sản phẩm — ví dụ
+  2e: trước sửa ghi 2 bản sửa chữa fixQty 2 và 1, sau sửa ghi đúng 1 bản fixQty 3) — không cần
+  sửa hàm đó.
+
+### File thay đổi (đợt 3)
+- `client/src/App.tsx` — công thức `remaining` ở tab Đơn hàng trừ thêm tiền hoàn hàng.
+- `server/src/actions.ts` — gộp theo sản phẩm ở `createOrder`, `updateOrderStatus` (5 nhánh),
+  `createMovementBatch`, `createReturn`, `closeStocktake`, `releaseReservation`.
+- `tests/repro-2-bugs-round3.ts` (mới) + `tests/repro-2-before-fix.log` / `tests/repro-2-after-fix.log` (mới).
+- `CHANGES.md`, `TESTING.md` (thêm mục 7d: kiểm tra 2 lỗi đợt 3 trên trình duyệt thật),
+  `TEST_RESULTS.md` (thêm mục H + cập nhật mục G), `README.md` (thêm harness đợt 3).
+- Không có migration mới. Không đẩy GitHub, không sửa sync record (theo yêu cầu đợt này).
+
+### Giới hạn còn lại (đợt 3 — bổ sung, các giới hạn đợt 2 vẫn còn nguyên)
+- **Nếu có người khác thay đổi tồn chen ngang giữa lúc áp và lúc bù thì bù vẫn thất bại đúng
+  như thiết kế** (guard version) và vẫn cần đối chiếu thủ công — đó là giới hạn do không có
+  transaction thật, không được quảng cáo là đã hết. Harness 2e chứng minh đúng hành vi này:
+  đơn lỗi nêu rõ "đối chiếu tồn kho", có đúng 1 bản ghi sửa chữa với fixQty đúng tuyệt đối
+  (3 = 10 − 7), tồn giữ nguyên 7 không ghi đè thay đổi của người kia; cần chạy Đối chiếu tồn
+  kho sau sự cố (xem `TESTING.md` mục 7c).
+- **Chốt kiểm kê đồng thời 2 tab/máy** vẫn có thể điều chỉnh trùng (giới hạn đợt 2, chưa sửa
+  trong đợt này); gộp theo sản phẩm chỉ xử lý trùng dòng trong MỘT lần chốt.
+- Chưa kiểm thử trên trình duyệt thật: trả một phần → thu đủ → xem màn hình Đơn hàng, và
+  tạo đơn 2 dòng cùng SP rồi ngắt mạng lúc xác nhận → tồn phải tự về đúng — xem `TESTING.md`
+  mục 7d và `TEST_RESULTS.md` mục G (ghi "Chưa chạy được", không ghi Đạt).
 
 ## Sửa 4 nhóm lỗi — đợt 2 (ngày 2026-11-10) — xem `TEST_RESULTS.md` mục E–G
 

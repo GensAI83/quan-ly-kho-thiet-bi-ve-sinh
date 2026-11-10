@@ -101,7 +101,29 @@ Chạy thử trước khi dùng app cho bán hàng thật. Chuẩn bị: đăng 
   nhất quán: hoặc đơn đã xác nhận (tồn đã trừ, có phiếu xuất) hoặc đơn đã hủy (tồn hoàn
   lại, có phiếu hoàn kho) — không được vừa trừ vừa hoàn (tồn lệch).
 
-### 7c. Sau các thao tác trên
+### 7c. Kiểm tra 2 lỗi đợt 3 (mới ngày 2026-11-10)
+
+> Harness `tests/repro-2-bugs-round3.ts` đã kiểm chứng ở mức code (12/12 PASS) — các bước
+> dưới đây kiểm tra lại trên trình duyệt thật. Kết quả xem ở `TEST_RESULTS.md` mục G/H.
+
+- [ ] Trả một phần rồi thu đủ: tạo đơn 100đ gồm 2 mặt hàng (60đ + 40đ), xác nhận → trả hàng
+  mặt hàng 40đ → mở chi tiết đơn ở tab Đơn hàng: "Còn phải thu" phải là **60đ** (không phải
+  100đ), bấm "Ghi nhận cọc" thì ô số tiền gợi ý sẵn **60đ** → ghi cọc 60đ → "Còn phải thu"
+  phải về **0đ**, trạng thái thanh toán "Đã thanh toán", tab Công nợ còn 0đ. (Trước sửa:
+  sau khi thu đủ 60đ màn hình Đơn hàng vẫn báo còn nợ 40đ.)
+- [ ] Đơn 2 dòng cùng sản phẩm + ngắt mạng lúc xác nhận: tạo đơn chờ gồm 2 dòng cùng 1 sản
+  phẩm (×2 và ×1), tồn 10 → bật chế độ offline rồi bấm "Xác nhận" → bật mạng lại → tồn phải
+  tự về đúng **10**, không có phiếu xuất, không có đơn mồ côi, không có bản ghi sửa chữa
+  trong "Chờ hoàn kho" ở Tổng quan. Bấm "Xác nhận" lại (có mạng) → tồn **7**, đúng **1 phiếu**
+  "Xuất theo đơn hàng" số lượng 3 (before 10 → after 7) trong Lịch sử, đơn vẫn đủ 2 dòng hàng.
+- [ ] Tương tự với phiếu nhập/xuất nhiều mặt hàng: 1 phiếu xuất 2 dòng cùng sản phẩm (×2 và
+  ×1), tồn 10 → ngắt mạng lúc ghi → tồn về đúng 10, không phiếu nào; bấm lại → tồn 7,
+  đúng 1 phiếu xuất số lượng 3.
+- [ ] Trả hàng 2 dòng cùng sản phẩm: đơn đã xác nhận có 2 dòng cùng sản phẩm (×2 và ×1) →
+  trả mỗi dòng 1 cái → tồn tăng đúng 2 (7 → 9), đúng 1 phiếu nhập trả hàng số lượng 2,
+  mỗi dòng hiển thị "đã trả 1".
+
+### 7d. Sau các thao tác trên
 
 - [ ] Tab Kiểm kê → "Đối chiếu tồn kho": danh sách lệch phải rỗng sau các thao tác đúng;
   nếu có lệch, kiểm tra tab Tổng quan → mục "Chờ hoàn kho" có bản ghi sửa chữa ghi rõ

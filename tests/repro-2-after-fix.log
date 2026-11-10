@@ -1,0 +1,20 @@
+=== HARNESS TÁI HIỆN 2 LỖI ĐỢT 3 — quản lý kho thiết bị vệ sinh ===
+Ngày chạy: 2026-11-10T02:13:50.774Z
+  [PASS] 1a trả 40đ rồi thu đủ 60đ: client hiển thị Còn phải thu == 0 (công thức cũ cho ra 40đ) — ret ok=true, dep ok=true, paymentStatus=paid, công nợ còn=0, client: công thức client CÓ trừ tiền hoàn: tổng 100 − hoàn 40 − cọc 60 = 0
+  [PASS] 1b trả 40đ rồi bấm Ghi nhận cọc: số tiền gợi ý == 60đ (công thức cũ gợi ý 100đ) — ret ok=true, client: công thức client CÓ trừ tiền hoàn: tổng 100 − hoàn 40 − cọc 0 = 60
+  [PASS] 1c kiểm tra tĩnh: dòng tính remaining trong App.tsx trừ tiền hoàn (chứa refunded/returnedQty) — dòng remaining có trừ tiền hoàn
+  [PASS] 2a tạo đơn 2 dòng cùng SP + lỗi ghi: đơn thất bại, tồn về đúng 10, 0 phiếu xuất, 0 đơn, 0 bản ghi sửa chữa — ord={"ok":false,"error":"Ghi dữ liệu thất bại (Mô phỏng mất mạng khi ghi dữ liệu.), tồn đã hoàn về số trước đó. Vui lòng thử lại.","orderCode":"","id":0}, stock=10 (trước sửa kẹt ở 8), orders=0, out=0, repairs mới=0
+  [PASS] 2b tạo đơn 2 dòng cùng SP thành công: tồn 7, đúng 1 phiếu xuất (số lượng 3, before 10 → after 7), đơn đủ 2 dòng — stock=7, out movements=1 [{"qty":3,"before":10,"after":7}], order lines=2
+  [PASS] 2c xác nhận đơn pending 2 dòng cùng SP + lỗi ghi: tồn về đúng 10, đơn vẫn pending, 0 phiếu xuất, 0 bản ghi sửa chữa — conf={"ok":false,"error":"Ghi dữ liệu thất bại (Mô phỏng mất mạng khi ghi dữ liệu.), tồn đã hoàn về số trước đó. Vui lòng thử lại.","pendingRestocks":[]}, stock=10 (trước sửa kẹt ở 8), status=pending, out=0, repairs mới=0
+  [PASS] 2d-1 phiếu batch 2 dòng cùng SP + lỗi ghi: tồn về đúng 10, 0 phiếu xuất, 0 bản ghi sửa chữa — batch={"ok":false,"error":"Ghi dữ liệu thất bại (Mô phỏng mất mạng khi ghi dữ liệu.), tồn đã hoàn về số trước đó. Vui lòng thử lại.","refCode":"","results":[]}, stock=10 (trước sửa kẹt ở 8), out=0, repairs mới=0
+  [PASS] 2d-2 phiếu batch 2 dòng cùng SP thành công: tồn 7, đúng 1 phiếu (số lượng 3, before 10 → after 7), results 1 SP — batch ok=true results=[{"productId":5,"newStock":7,"version":1}], stock=7, out=1
+  [PASS] 2d-3 trả hàng 2 dòng cùng SP + lỗi ghi: lỗi đúng là lỗi ghi đã tiêm, tồn về đúng 7, đã trả vẫn 0, 0 phiếu nhập trả, 0 bản ghi sửa chữa — ret={"ok":false,"error":"Ghi dữ liệu thất bại (Mô phỏng mất mạng khi ghi dữ liệu.), tồn đã hoàn về số trước đó. Vui lòng thử lại.","refCode":"","newStatus":"confirmed"}, stock=7 (trước thao tác 7; trước sửa lỗi xung đột version ở lần áp thứ 2), returnedQty tổng=0, in=0, repairs mới=0
+  [PASS] 2d-4 trả hàng 2 dòng cùng SP thành công: tồn 9, đúng 1 phiếu nhập (số lượng 2, before 7 → after 9), mỗi dòng đã trả 1 — ret ok=true {"ok":true,"error":null,"refCode":"DH20261110-9008","newStatus":"partially_returned"}, stock=9, in=1 [{"qty":2,"before":7,"after":9}], returnedQty=[1,1] (trước sửa: trả hàng 2 dòng cùng SP lỗi xung đột version ngay ở lần áp thứ 2)
+  [PASS] 2e chen ngang đổi tồn giữa áp và bù: đơn lỗi nêu rõ đối chiếu, đúng 1 bản ghi sửa chữa mới, fixQty == 3, tồn giữ nguyên 7 (không ghi đè) — ord={"ok":false,"error":"Ghi dữ liệu thất bại và không hoàn lại được tồn cho 1 mặt hàng — đã ghi vào mục Chờ hoàn kho, hãy đối chiếu tồn kho (Đối chiếu tồn kho) trước khi thao tác tiếp.","orderCode":"","id":0}, stock=7, repairs mới=1 [3] (trước sửa: 2 bản mới, fixQty 2 và 1)
+  [PASS] 2f huỷ giữ đơn reserved 2 dòng cùng SP: tồn về 10, reservedQty 0, đúng 1 phiếu hoàn (số lượng 3, before 7 → after 10), đơn đã huỷ — rel ok=true {"ok":true,"error":null}, stock lúc giữ=7, stock sau=10, reservedQty=0, in=1 [{"qty":3,"before":7,"after":10}], status=cancelled (trước sửa: huỷ giữ 2 dòng cùng SP lỗi xung đột version ở lần áp thứ 2)
+
+=== TỔNG KẾT ===
+1 — Trả một phần rồi thanh toán đủ: Còn phải thu ở client: 3/3 PASS
+2 — Nhiều dòng cùng sản phẩm: hoàn tồn khi gặp lỗi: 9/9 PASS
+TỔNG: 12 PASS, 0 FAIL
+KẾT LUẬN: TẤT CẢ ĐỀU PASS.

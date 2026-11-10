@@ -1097,13 +1097,16 @@ export const Actions = {
           });
         }));
         if (shouldDeduct) {
-          // Trừ kho từng dòng (version-checked); 1 dòng lỗi thì bù trừ hoàn lại rồi xoá đơn vừa tạo.
+          // Trừ kho GỘP THEO SẢN PHẨM (qtyByProduct đã cộng dồn ở bước validate):
+          // mỗi sản phẩm chỉ 1 lần applyStock trong một thao tác. Trừ từng dòng
+          // thì 2 dòng cùng sản phẩm tạo 2 lần áp nối nhau và bù ngược (guard
+          // version) sẽ thất bại ở lần áp đầu, tồn kẹt thiếu.
           const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
-          for (const it of args.items) {
-            const p = prodMap.get(it.productId)!;
+          for (const [pid, totalQty] of qtyByProduct) {
+            const p = prodMap.get(pid)!;
             const before = p.currentStock;
-            const after = before - it.quantity;
-            const afterReserved = isReserved ? p.reservedQty + it.quantity : p.reservedQty;
+            const after = before - totalQty;
+            const afterReserved = isReserved ? p.reservedQty + totalQty : p.reservedQty;
             const one = await applyStock(db, p, after, afterReserved);
             if (!one) {
               const failedN = await rollbackApplied(db, actorName, applied, "createOrder");
@@ -1112,7 +1115,7 @@ export const Actions = {
             }
             trackApplied(p, one);
             applied.push(one);
-            movData.push({ prod: p, before, after, qty: it.quantity });
+            movData.push({ prod: p, before, after, qty: totalQty });
           }
           await insertMovements(db, movData.map((m) => ({
             productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "out", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
@@ -1182,12 +1185,17 @@ export const Actions = {
         if (!isReservedOrder) {
           if (wasDeducted) {
             // confirmed -> reserved: kho đã trừ, chỉ cộng số lượng giữ.
+            // Gộp theo sản phẩm: reservedQty += tổng số lượng của sản phẩm
+            // (mỗi sản phẩm chỉ 1 lần applyStock, xem ghi chú ở createOrder).
+            const qtyByProduct = new Map<number, number>();
+            for (const it of items) qtyByProduct.set(it.productId, (qtyByProduct.get(it.productId) ?? 0) + it.quantity);
             const applied: StockApply[] = [];
             try {
-              for (const it of items) {
-                const p = prodById.get(it.productId);
-                if (!p) return { ok: false, error: `Sản phẩm "${it.productName}" (${it.productSku}) trong đơn đã bị xoá khỏi kho — không thể chuyển sang giữ hàng.`, pendingRestocks };
-                const one = await applyStock(db, p, p.currentStock, p.reservedQty + it.quantity);
+              for (const [pid, totalQty] of qtyByProduct) {
+                const p = prodById.get(pid);
+                const first = items.find((i) => i.productId === pid)!;
+                if (!p) return { ok: false, error: `Sản phẩm "${first.productName}" (${first.productSku}) trong đơn đã bị xoá khỏi kho — không thể chuyển sang giữ hàng.`, pendingRestocks };
+                const one = await applyStock(db, p, p.currentStock, p.reservedQty + totalQty);
                 if (!one) {
                   const failedN = await rollbackApplied(db, actorName, applied, "updateOrderStatus(reserved)");
                   return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, pendingRestocks };
@@ -1229,10 +1237,12 @@ export const Actions = {
             const movIds: number[] = [];
             const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
             try {
-              for (const it of items) {
-                const p = prodById.get(it.productId)!;
-                const before = p.currentStock; const after = before - it.quantity;
-                const one = await applyStock(db, p, after, p.reservedQty + it.quantity);
+              // Gộp theo sản phẩm (qtyByProduct đã cộng dồn ở trên): mỗi sản phẩm
+              // chỉ 1 lần applyStock + 1 phiếu xuất gộp.
+              for (const [pid, totalQty] of qtyByProduct) {
+                const p = prodById.get(pid)!;
+                const before = p.currentStock; const after = before - totalQty;
+                const one = await applyStock(db, p, after, p.reservedQty + totalQty);
                 if (!one) {
                   const failedN = await rollbackApplied(db, actorName, applied, "updateOrderStatus(reserved)");
                   await db.update(schema.orders).set({ status: order.status, stockDeducted: 0, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
@@ -1240,7 +1250,7 @@ export const Actions = {
                 }
                 trackApplied(p, one);
                 applied.push(one);
-                movData.push({ prod: p, before, after, qty: it.quantity });
+                movData.push({ prod: p, before, after, qty: totalQty });
               }
               await insertMovements(db, movData.map((m) => ({
                 productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "out", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
@@ -1259,12 +1269,16 @@ export const Actions = {
       } else if (shouldDeductTarget) {
         if (isReservedOrder && wasDeducted) {
           // reserved -> confirmed/delivering/completed: kho đã trừ, chỉ trừ số lượng giữ.
+          // Gộp theo sản phẩm: reservedQty −= tổng số lượng của sản phẩm.
+          const qtyByProduct = new Map<number, number>();
+          for (const it of items) qtyByProduct.set(it.productId, (qtyByProduct.get(it.productId) ?? 0) + it.quantity);
           const applied: StockApply[] = [];
           try {
-            for (const it of items) {
-              const p = prodById.get(it.productId);
-              if (!p) return { ok: false, error: `Sản phẩm "${it.productName}" (${it.productSku}) trong đơn đã bị xoá khỏi kho — không thể xác nhận đơn.`, pendingRestocks };
-              const one = await applyStock(db, p, p.currentStock, Math.max(0, p.reservedQty - it.quantity));
+            for (const [pid, totalQty] of qtyByProduct) {
+              const p = prodById.get(pid);
+              const first = items.find((i) => i.productId === pid)!;
+              if (!p) return { ok: false, error: `Sản phẩm "${first.productName}" (${first.productSku}) trong đơn đã bị xoá khỏi kho — không thể xác nhận đơn.`, pendingRestocks };
+              const one = await applyStock(db, p, p.currentStock, Math.max(0, p.reservedQty - totalQty));
               if (!one) {
                 const failedN = await rollbackApplied(db, actorName, applied, "updateOrderStatus(confirm-reserved)");
                 return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, pendingRestocks };
@@ -1311,9 +1325,11 @@ export const Actions = {
           const movIds: number[] = [];
           const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
           try {
-            for (const it of items) {
-              const p = prodById.get(it.productId)!;
-              const before = p.currentStock; const after = before - it.quantity;
+            // Gộp theo sản phẩm (qtyByProduct đã cộng dồn ở trên): mỗi sản phẩm
+            // chỉ 1 lần applyStock + 1 phiếu xuất gộp.
+            for (const [pid, totalQty] of qtyByProduct) {
+              const p = prodById.get(pid)!;
+              const before = p.currentStock; const after = before - totalQty;
               const one = await applyStock(db, p, after, p.reservedQty);
               if (!one) {
                 const failedN = await rollbackApplied(db, actorName, applied, "updateOrderStatus(confirm)");
@@ -1322,7 +1338,7 @@ export const Actions = {
               }
               trackApplied(p, one);
               applied.push(one);
-              movData.push({ prod: p, before, after, qty: it.quantity });
+              movData.push({ prod: p, before, after, qty: totalQty });
             }
             await insertMovements(db, movData.map((m) => ({
               productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "out", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
@@ -1350,28 +1366,42 @@ export const Actions = {
           const applied: StockApply[] = [];
           const movIds: number[] = [];
           const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
+          // Gộp theo sản phẩm TRƯỚC khi hoàn kho: mỗi sản phẩm chỉ 1 lần
+          // applyStock + 1 phiếu hoàn gộp. netQty = phần chưa trả (cộng dồn các
+          // dòng cùng sản phẩm — 2 dòng cùng SP, 1 dòng đã trả hết và 1 dòng
+          // chưa trả thì hoàn đúng tổng phần chưa trả); totalQty = tổng số
+          // lượng của sản phẩm trên đơn (dùng cho afterReserved khi là đơn giữ
+          // hàng: trừ toàn bộ số lượng đang giữ, không dùng netQty).
+          const netByProduct = new Map<number, { totalQty: number; netQty: number; firstItem: (typeof items)[number] }>();
           for (const it of items) {
-            // Chỉ hoàn lại phần CHƯA trả (net = số lượng − đã trả): hàng đã trả khách
-            // trước đó đã được cộng lại kho lúc trả, hủy đơn không được cộng lần nữa.
             const netQty = Math.max(0, it.quantity - (it.returnedQty ?? 0));
-            if (netQty <= 0) continue; // dòng này đã trả hết: không sinh phiếu hoàn kho
-            if (!hasOutEvidence(it.productId)) continue; // chưa từng trừ kho cho dòng này: không có gì để hoàn
-            const p = prodById.get(it.productId);
+            const e = netByProduct.get(it.productId) ?? { totalQty: 0, netQty: 0, firstItem: it };
+            e.totalQty += it.quantity;
+            e.netQty += netQty;
+            netByProduct.set(it.productId, e);
+          }
+          for (const [pid, g] of netByProduct) {
+            // Chỉ hoàn lại phần CHƯA trả: hàng đã trả khách trước đó đã được cộng
+            // lại kho lúc trả, hủy đơn không được cộng lần nữa.
+            if (g.netQty <= 0) continue; // các dòng của SP này đã trả hết: không sinh phiếu hoàn kho
+            if (!hasOutEvidence(pid)) continue; // chưa từng trừ kho cho SP này: không có gì để hoàn
+            const p = prodById.get(pid);
             if (!p || p.status === "discontinued") {
-              // Không bỏ qua im lặng: ghi vào phiếu chờ hoàn kho để xử lý sau (tránh ghi trùng khi thử lại).
-              pendingRestocks.push({ productName: it.productName, quantity: netQty });
+              // Không bỏ qua im lặng: ghi vào phiếu chờ hoàn kho để xử lý sau
+              // (tránh ghi trùng khi thử lại) — ghi 1 lần theo tổng netQty của SP.
+              pendingRestocks.push({ productName: g.firstItem.productName, quantity: g.netQty });
               const dup = await db.select().from(schema.pendingRestocks)
-                .where(and(eq(schema.pendingRestocks.orderCode, order.orderCode), eq(schema.pendingRestocks.productId, it.productId), eq(schema.pendingRestocks.status, "pending"))).limit(1);
+                .where(and(eq(schema.pendingRestocks.orderCode, order.orderCode), eq(schema.pendingRestocks.productId, pid), eq(schema.pendingRestocks.status, "pending"))).limit(1);
               if (!dup[0]) {
                 await db.insert(schema.pendingRestocks).values({
-                  orderCode: order.orderCode, productId: it.productId, productSku: it.productSku, productName: it.productName,
-                  quantity: netQty, unitPrice: it.unitPrice, reason: "Sản phẩm đã bị xóa/ngưng khi hủy đơn",
+                  orderCode: order.orderCode, productId: pid, productSku: g.firstItem.productSku, productName: g.firstItem.productName,
+                  quantity: g.netQty, unitPrice: g.firstItem.unitPrice, reason: "Sản phẩm đã bị xóa/ngưng khi hủy đơn",
                 });
               }
               continue;
             }
-            const before = p.currentStock; const after = before + netQty;
-            const afterReserved = isReservedOrder ? Math.max(0, p.reservedQty - it.quantity) : p.reservedQty;
+            const before = p.currentStock; const after = before + g.netQty;
+            const afterReserved = isReservedOrder ? Math.max(0, p.reservedQty - g.totalQty) : p.reservedQty;
             const one = await applyStock(db, p, after, afterReserved);
             if (!one) {
               const failedN = await rollbackApplied(db, actorName, applied, "updateOrderStatus(cancel)");
@@ -1379,7 +1409,7 @@ export const Actions = {
             }
             trackApplied(p, one);
             applied.push(one);
-            movData.push({ prod: p, before, after, qty: netQty });
+            movData.push({ prod: p, before, after, qty: g.netQty });
           }
           try {
             if (movData.length > 0) {
@@ -1470,10 +1500,18 @@ export const Actions = {
       const refCode = genRefCode(args.type);
       const applied: StockApply[] = [];
       const movData: { prod: ProdRow; before: number; after: number; line: (typeof args.lines)[number] }[] = [];
+      // Gộp theo sản phẩm: mỗi sản phẩm chỉ 1 lần applyStock + 1 phiếu gộp
+      // (số lượng = tổng, reason/partner/note/unitCost lấy dòng đầu tiên của SP).
+      const groupedLines = new Map<number, { totalQty: number; first: (typeof args.lines)[number] }>();
       for (const line of args.lines) {
-        const p = prodMap.get(line.productId)!;
+        const e = groupedLines.get(line.productId) ?? { totalQty: 0, first: line };
+        e.totalQty += line.quantity;
+        groupedLines.set(line.productId, e);
+      }
+      for (const [pid, g] of groupedLines) {
+        const p = prodMap.get(pid)!;
         const before = p.currentStock;
-        const after = args.type === "in" ? before + line.quantity : before - line.quantity;
+        const after = args.type === "in" ? before + g.totalQty : before - g.totalQty;
         const one = await applyStock(db, p, after, p.reservedQty);
         if (!one) {
           const failedN = await rollbackApplied(db, actorName, applied, "createMovementBatch");
@@ -1481,7 +1519,7 @@ export const Actions = {
         }
         trackApplied(p, one);
         applied.push(one);
-        movData.push({ prod: p, before, after, line });
+        movData.push({ prod: p, before, after, line: { ...g.first, quantity: g.totalQty } });
       }
       // Saga: ghi phiếu lỗi sau khi đã áp tồn thì xóa phiếu vừa ghi + hoàn tồn.
       const movIds: number[] = [];
@@ -1547,17 +1585,26 @@ export const Actions = {
       }
       const applied: StockApply[] = [];
       const movData: { prod: ProdRow; before: number; after: number; qty: number; unitPrice: number }[] = [];
+      // Gộp theo sản phẩm: mỗi sản phẩm chỉ 1 lần applyStock + 1 phiếu nhập
+      // gộp (unitCost lấy dòng đầu của SP). Cập nhật returnedQty vẫn theo từng
+      // orderItem (giữ nguyên ở bước saga bên dưới, tách khỏi phần áp tồn).
+      const qtyByProduct = new Map<number, { totalQty: number; first: (typeof lineItems)[number] }>();
       for (const li of lineItems) {
-        const before = li.prod.currentStock;
-        const after = before + li.qty;
-        const one = await applyStock(db, li.prod, after, li.prod.reservedQty);
+        const e = qtyByProduct.get(li.item.productId) ?? { totalQty: 0, first: li };
+        e.totalQty += li.qty;
+        qtyByProduct.set(li.item.productId, e);
+      }
+      for (const [, g] of qtyByProduct) {
+        const before = g.first.prod.currentStock;
+        const after = before + g.totalQty;
+        const one = await applyStock(db, g.first.prod, after, g.first.prod.reservedQty);
         if (!one) {
           const failedN = await rollbackApplied(db, actorName, applied, "createReturn");
           return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, refCode: "", newStatus: order.status };
         }
-        trackApplied(li.prod, one);
+        trackApplied(g.first.prod, one);
         applied.push(one);
-        movData.push({ prod: li.prod, before, after, qty: li.qty, unitPrice: li.item.unitPrice });
+        movData.push({ prod: g.first.prod, before, after, qty: g.totalQty, unitPrice: g.first.item.unitPrice });
       }
       const refundTotal = lineItems.reduce((s, li) => s + li.qty * li.item.unitPrice, 0);
       const newReturned = new Map<number, number>();
@@ -1666,18 +1713,31 @@ export const Actions = {
       const items = await db.select().from(schema.orderItems).where(eq(schema.orderItems.orderId, order.id));
       const applied: StockApply[] = [];
       const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
+      // Gộp theo sản phẩm (ngoài danh sách 5 chỗ đợt 3 nhưng cùng mẫu lỗi:
+      // 2 dòng cùng SP thì lần áp thứ 2 xung đột version, bù ngược cũng kẹt):
+      // mỗi sản phẩm chỉ 1 lần applyStock + 1 phiếu hoàn gộp, reservedQty −=
+      // tổng số lượng giữ của sản phẩm.
+      const qtyByProduct = new Map<number, { totalQty: number; prod?: ProdRow }>();
       for (const it of items) {
-        const prod = await getProduct(db, it.productId);
+        let e = qtyByProduct.get(it.productId);
+        if (!e) {
+          e = { totalQty: 0, prod: await getProduct(db, it.productId) };
+          qtyByProduct.set(it.productId, e);
+        }
+        e.totalQty += it.quantity;
+      }
+      for (const [, g] of qtyByProduct) {
+        const prod = g.prod;
         if (!prod) continue; // sản phẩm đã xoá: không hoàn được kho, đơn vẫn huỷ (ghi chú trong audit)
-        const before = prod.currentStock; const after = before + it.quantity;
-        const one = await applyStock(db, prod, after, Math.max(0, prod.reservedQty - it.quantity));
+        const before = prod.currentStock; const after = before + g.totalQty;
+        const one = await applyStock(db, prod, after, Math.max(0, prod.reservedQty - g.totalQty));
         if (!one) {
           const failedN = await rollbackApplied(db, actorName, applied, "releaseReservation");
           return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT };
         }
         trackApplied(prod, one);
         applied.push(one);
-        movData.push({ prod, before, after, qty: it.quantity });
+        movData.push({ prod, before, after, qty: g.totalQty });
       }
       // Saga: ghi phiếu + đổi trạng thái đơn + void công nợ lỗi thì dọn + hoàn tồn.
       const movIds: number[] = [];
@@ -2428,19 +2488,33 @@ export const Actions = {
       if (take.status !== "draft") return { ok: false, error: "Phiếu kiểm kê đã đóng.", diffs: [] };
       const items = await db.select().from(schema.stocktakeItems).where(eq(schema.stocktakeItems.stocktakeId, take.id));
       const diffItems = items.filter((i) => i.diffQty !== 0);
+      // Gộp phòng thủ theo sản phẩm: bảng stocktake_items KHÔNG có unique
+      // constraint trên (stocktakeId, productId), nhưng saveStocktakeItem upsert
+      // theo cặp này nên thực tế không trùng dòng. Gộp để mỗi sản phẩm chỉ 1
+      // lần applyStock (tránh bù ngược thất bại do guard version khi có 2 dòng
+      // cùng sản phẩm); diffQty cộng dồn, metadata lấy dòng đầu của SP.
+      const groupedDiffs = new Map<number, { totalDiff: number; first: (typeof items)[number] }>();
+      for (const item of diffItems) {
+        const e = groupedDiffs.get(item.productId) ?? { totalDiff: 0, first: item };
+        e.totalDiff += item.diffQty;
+        groupedDiffs.set(item.productId, e);
+      }
+      const diffGroups = [...groupedDiffs.values()];
       const diffs: { productSku: string; productName: string; systemQty: number; countedQty: number; diff: number; systemQtyAtCount: number; systemQtyAtClose: number; appliedDiff: number }[] = [];
       // (a) Validate TOÀN BỘ dòng trước khi áp bất kỳ dòng nào: sản phẩm còn tồn
       // tại/còn kinh doanh, tồn sau điều chỉnh không âm.
-      for (const item of diffItems) {
+      for (const g of diffGroups) {
+        const item = g.first;
         const prod = await getProduct(db, item.productId);
         if (!prod || prod.status === "discontinued") return { ok: false, error: `Sản phẩm "${item.productName}" đã bị xoá hoặc ngưng kinh doanh, không thể điều chỉnh tồn.`, diffs };
-        if (prod.currentStock + item.diffQty < 0) return { ok: false, error: `Không thể chốt kiểm kê: tồn của "${item.productName}" sau điều chỉnh sẽ âm (${prod.currentStock + item.diffQty}). Hãy kiểm tra lại số đếm hoặc phiếu nhập/xuất gần đây.`, diffs };
+        if (prod.currentStock + g.totalDiff < 0) return { ok: false, error: `Không thể chốt kiểm kê: tồn của "${item.productName}" sau điều chỉnh sẽ âm (${prod.currentStock + g.totalDiff}). Hãy kiểm tra lại số đếm hoặc phiếu nhập/xuất gần đây.`, diffs };
       }
       const applied: StockApply[] = [];
       const movIds: number[] = [];
-      const movData: { prod: ProdRow; item: (typeof items)[number]; before: number; after: number }[] = [];
+      const movData: { prod: ProdRow; item: (typeof items)[number]; before: number; after: number; diffQty: number }[] = [];
       try {
-        for (const item of diffItems) {
+        for (const g of diffGroups) {
+          const item = g.first;
           // (c) Chốt lại lũy đẳng: dòng nào đã có phiếu adjust mang mã phiếu này thì
           // bỏ qua (đã áp rồi), không điều chỉnh trùng.
           const prod = await getProduct(db, item.productId);
@@ -2458,8 +2532,9 @@ export const Actions = {
           // tồn HIỆN TẠI lúc chốt, để không nuốt mất hàng nhập/xuất xen giữa lúc đếm và lúc chốt.
           // VD: sổ lúc đếm 4, đếm được 9 (diff +5), nhập thêm 5 (tồn 9) -> chốt ghi tồn 14.
           // Kiểm tra lại tồn âm với số mới nhất (tồn có thể đổi sau bước validate).
+          // totalDiff là chênh lệch đã gộp theo sản phẩm (bằng diffQty khi không trùng dòng).
           const currentStock = prod.currentStock;
-          const after = currentStock + item.diffQty;
+          const after = currentStock + g.totalDiff;
           if (after < 0) {
             const failedN = await rollbackApplied(db, actorName, applied, "closeStocktake");
             return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : `Không thể chốt kiểm kê: tồn của "${item.productName}" sau điều chỉnh sẽ âm (${after}). Hãy kiểm tra lại số đếm hoặc phiếu nhập/xuất gần đây.`, diffs };
@@ -2471,18 +2546,18 @@ export const Actions = {
           }
           trackApplied(prod, one);
           applied.push(one);
-          movData.push({ prod, item, before: currentStock, after });
+          movData.push({ prod, item, before: currentStock, after, diffQty: g.totalDiff });
           // Diffs trả về tính lại theo tồn hiện tại lúc chốt (systemQty = tồn lúc chốt,
           // diff = đếm − tồn lúc chốt); số điều chỉnh thực tế áp vào kho là appliedDiff.
-          diffs.push({ productSku: item.productSku, productName: item.productName, systemQty: currentStock, countedQty: item.countedQty, diff: item.countedQty - currentStock, systemQtyAtCount: item.systemQty, systemQtyAtClose: currentStock, appliedDiff: item.diffQty });
+          diffs.push({ productSku: item.productSku, productName: item.productName, systemQty: currentStock, countedQty: item.countedQty, diff: item.countedQty - currentStock, systemQtyAtCount: item.systemQty, systemQtyAtClose: currentStock, appliedDiff: g.totalDiff });
         }
         // (b) Ghi phiếu + đóng phiếu trong try/catch saga: lỗi nào cũng xóa phiếu
         // vừa ghi + hoàn tồn đã áp (có kiểm tra + ghi sửa chữa nếu bù không được).
         await insertMovements(db, movData.map((m) => ({
-          productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "adjust", quantity: Math.abs(m.item.diffQty),
+          productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "adjust", quantity: Math.abs(m.diffQty),
           beforeStock: m.before, afterStock: m.after, unitCost: m.prod.costPrice,
           reason: `Kiểm kê ${take.code}`, refCode: take.code, partner: "",
-          note: `Kiểm kê ${take.code}: đếm ${m.item.countedQty}, sổ lúc đếm ${m.item.systemQty}, sổ lúc chốt ${m.before}, điều chỉnh ${m.item.diffQty > 0 ? "+" : ""}${m.item.diffQty}`,
+          note: `Kiểm kê ${take.code}: đếm ${m.item.countedQty}, sổ lúc đếm ${m.item.systemQty}, sổ lúc chốt ${m.before}, điều chỉnh ${m.diffQty > 0 ? "+" : ""}${m.diffQty}`,
           actor: actorName,
         })), movIds);
         await db.update(schema.stocktakes).set({ status: "closed", closedAt: new Date() }).where(eq(schema.stocktakes.id, take.id));
@@ -2492,7 +2567,7 @@ export const Actions = {
       }
       // Audit là nhật ký (best-effort).
       for (const m of movData) {
-        await writeAudit(db, actorName, "close_stocktake_adjust", "product", m.prod.id, { stocktakeCode: take.code, sku: m.prod.sku, systemQtyAtCount: m.item.systemQty, systemQtyAtClose: m.before, countedQty: m.item.countedQty, appliedDiff: m.item.diffQty }).catch(() => {});
+        await writeAudit(db, actorName, "close_stocktake_adjust", "product", m.prod.id, { stocktakeCode: take.code, sku: m.prod.sku, systemQtyAtCount: m.item.systemQty, systemQtyAtClose: m.before, countedQty: m.item.countedQty, appliedDiff: m.diffQty }).catch(() => {});
       }
       await writeAudit(db, actorName, "close_stocktake", "stocktake", take.id, { code: take.code, diffCount: diffItems.length });
       ctx.invalidateQueries();
