@@ -31,25 +31,25 @@
 
 **Interfaces:** `openLocalDatabase(root, migrationsDir)` returns `{db, sqlite, close}`. `createLocalApp({root, migrationsDir, publicDir})` returns a request `fetch` handler and `close` lifecycle. Actions receive the existing db/invalidateQueries context.
 
-- [ ] Write tests for persistent migration/reopen, mixed-price movements, rollback on failed SQL write, failed-login lockout, invalid action/payload/origin and private-file access.
-- [ ] Run tests and observe missing standalone runtime failure.
-- [ ] Implement native database, contract and serialized transactional HTTP handler.
-- [ ] Run native tests and all existing regression harnesses; verify failures and successful data persistence.
+- [x] Write tests for persistent migration/reopen, mixed-price movements, rollback on failed SQL write, failed-login lockout, invalid action/payload/origin and private-file access.
+- [x] Run tests and observe missing standalone runtime failure.
+- [x] Implement native database, contract and serialized transactional HTTP handler.
+- [x] Run native tests and all existing regression harnesses; verify failures and successful data persistence.
 
 ### Task 2: Offline frontend and executable
 
 **Files:** `client/src/api.ts`, `client/src/main.tsx`, `client/src/App.tsx`, `client/src/theme.css`, `client/build.mjs`, `scripts/build-local.ts`, local tsconfigs and runtime test scripts.
 
-- [ ] Use the backend contract to replace Hatch client utilities, preserving existing query/mutation behavior.
-- [ ] Replace Internet-only connectivity detection with server health; remove external font request.
-- [ ] Build static JS/CSS, compile EXE, copy migrations without touching `data`.
-- [ ] Typecheck and run compiled-EXE HTTP tests including real database restart and money/stock scenarios.
+- [x] Use the backend contract to replace Hatch client utilities, preserving existing query/mutation behavior.
+- [x] Replace Internet-only connectivity detection with server health; remove external font request.
+- [x] Build static JS/CSS, compile EXE, copy migrations without touching `data`.
+- [x] Typecheck and run compiled-EXE HTTP tests including real database restart and money/stock scenarios.
 
 ### Task 3: Windows launch, browser and handoff
 
 **Files:** `windows/Open-Kho.ps1`, `windows/Stop-Kho.ps1`, launcher files, `HUONG-DAN.txt`, `scripts/browser-smoke` and verification evidence under `D:\QuanLyKho\checks`.
 
-- [ ] Implement D-only environment/profile/download setup, hidden background server and duplicate-open detection; implement graceful authenticated shutdown.
-- [ ] Exercise launch/stop and a browser workflow with output stored on D; inspect browser screenshot and console/network failures.
-- [ ] Obtain a fresh whole-branch review, fix actionable problems, rerun affected checks, and record limitations.
-- [ ] Leave a local commit, open the ready app and provide exact launch/data/backup locations.
+- [x] Implement D-only environment/profile/download setup, hidden background server and duplicate-open detection; implement graceful authenticated shutdown.
+- [x] Exercise launch/stop and a browser workflow with output stored on D; inspect browser screenshot and console/network failures.
+- [x] Obtain a fresh whole-branch review, fix actionable problems, rerun affected checks, and record limitations.
+- [x] Leave a local commit, open the ready app and provide exact launch/data/backup locations.
