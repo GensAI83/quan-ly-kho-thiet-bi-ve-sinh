@@ -1,4 +1,7 @@
 node_modules/
+.bun-cache/
+cache/
+.superpowers/
 dist/
 client/dist/
 client/dist-cvm/

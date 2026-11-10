@@ -1,0 +1,25 @@
+QUẢN LÝ KHO — BẢN CHẠY TRÊN MÁY
+
+1. Mở MoKho.cmd (hoặc lối tắt Mở kho). Ứng dụng tự mở trong Edge/Chrome.
+2. Đăng nhập lần đầu bằng mã PIN 123456, sau đó đặt PIN riêng khi được yêu cầu.
+3. Dùng bình thường khi không có Internet. Chỉ máy này truy cập được dữ liệu.
+4. Khi dùng xong, bấm TatKho.cmd. Đóng tab trình duyệt chưa tắt phần chạy nền.
+
+NƠI LƯU (đều nằm trong thư mục ứng dụng trên ổ D)
+data\warehouse.sqlite : dữ liệu kho và tài khoản.
+backups\              : bản sao cơ sở dữ liệu khi mở app lần đầu trong ngày/khi tắt app.
+exports\              : file CSV/JSON tải về khi dùng trình duyệt riêng của app.
+browser-profile\      : hồ sơ trình duyệt riêng, không dùng hồ sơ mặc định trên C.
+logs\                 : nhật ký để kiểm tra khi có lỗi.
+source\               : mã nguồn và bộ kiểm thử; không cần mở để dùng hằng ngày.
+
+Trước khi sao chép toàn bộ ứng dụng sang máy khác, hãy bấm TatKho.cmd và đợi
+ứng dụng dừng. Giữ cả thư mục, đặc biệt data, backups, public và migrations.
+Mã nguồn GitHub không có dữ liệu kho từ Muse; bản này bắt đầu với kho trống.
+Mã PIN và dữ liệu từ app cũ không tự chuyển sang bản này.
+
+Nếu không mở được: xem logs\server-stderr.log. Cổng mặc định là 17830;
+có thể sửa port trong cau-hinh.json khi ứng dụng đã tắt.
+
+Không chuyển thư mục ứng dụng sang ổ C. Windows và trình duyệt vẫn là phần
+mềm có sẵn của máy; toàn bộ phần lưu trữ do bản kho này thiết lập nằm ở D.

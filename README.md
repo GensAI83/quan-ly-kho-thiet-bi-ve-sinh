@@ -1,5 +1,18 @@
 # Quản lý kho thiết bị vệ sinh
 
+## Bản Windows chạy trực tiếp trên máy (nhánh codex/local-windows)
+
+- Mở `D:\QuanLyKho\MoKho.cmd`, dùng trong Edge/Chrome; không cần Internet, Bun hay Node để sử dụng bản EXE đã đóng gói.
+- Tắt bằng `D:\QuanLyKho\TatKho.cmd`. Ứng dụng chỉ lắng nghe `127.0.0.1:17830`.
+- Mã PIN đầu tiên: `123456`, bắt buộc đổi sau đăng nhập. Bản local bắt đầu với kho trống; dữ liệu từ Muse không nằm trong repository.
+- Dữ liệu: `data/warehouse.sqlite`; sao lưu: `backups/`; file tải xuống: `exports/`; profile trình duyệt: `browser-profile/`. Tất cả nằm trên D, cạnh EXE. Không chuyển sang C.
+- Đã thay Hatch SDK bằng HTTP RPC có Zod validation, SQLite/Drizzle và giao dịch cho mỗi thao tác. Request được xử lý tuần tự; các thao tác kho lỗi được rollback, còn bộ đếm đăng nhập sai và CSV nhập một phần giữ nguyên hành vi nghiệp vụ.
+- Để phát triển, dùng Bun 1.3.12 trở lên. Từ thư mục source: `bun install`, `bun run typecheck`, `bun test tests/local-app.test.ts`, `bun run test`, `bun run build`. Đặt TEMP/TMP và cache trên D như trong kế hoạch local; `bun run build` không sửa dữ liệu đang có.
+- Kiểm tra EXE: `bun scripts/exe-smoke.ts`. Kiểm tra UI: `node --experimental-strip-types scripts/browser-smoke.ts` (Edge có sẵn, toàn bộ profile/artifact test trên D).
+- Xem `D:\QuanLyKho\HUONG-DAN.txt` và `docs/superpowers/specs/2026-11-10-local-windows-design.md`.
+
+Các phần ghi chú build Muse bên dưới là lịch sử của bản gốc; bản Windows không còn cần SDK nội bộ đó.
+
 App quản lý kho thiết bị vệ sinh — nhập/xuất kho, tồn kho, lịch sử giao dịch, đơn hàng và đối tác.
 
 ## Tính năng

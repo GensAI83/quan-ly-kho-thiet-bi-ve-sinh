@@ -1,4 +1,4 @@
-import { defineAction, z, type ActionsModule, type SpaceDb } from "@hatch/space-sdk";
+import { defineAction, z, type ActionsModule, type SpaceDb } from "./local-contract";
 import { and, desc, eq, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import * as schema from "./schema";

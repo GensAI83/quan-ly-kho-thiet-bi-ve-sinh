@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { SafeAreaTopScrim } from "@hatch/space-sdk/client";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, type ApiResponse } from "./api";
 
@@ -59,9 +58,8 @@ function newRequestKey(): string {
   return `rk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 function netErrMsg(e: unknown): string {
-  if (!navigator.onLine) return "Không có mạng, chưa ghi gì — bấm lại sau khi có mạng.";
   const m = e instanceof Error ? e.message : String(e);
-  if (/network|fetch|failed to fetch|load failed|offline/i.test(m)) return "Không có mạng, chưa ghi gì — bấm lại sau khi có mạng.";
+  if (/network|fetch|failed to fetch|load failed|offline/i.test(m)) return "Không kết nối được ứng dụng trên máy. Hãy mở lại bằng nút Mở kho; kiểm tra lịch sử trước khi gửi lại thao tác.";
   return m;
 }
 function downloadBlob(blob: Blob, filename: string) {
@@ -1317,14 +1315,17 @@ export function App() {
   const [cpNew, setCpNew] = useState("");
   const [cpConfirm, setCpConfirm] = useState("");
   const [cpErr, setCpErr] = useState("");
-  const [online, setOnline] = useState(() => navigator.onLine);
+  const [online, setOnline] = useState(true);
 
   useEffect(() => {
-    const on = () => setOnline(true);
-    const off = () => setOnline(false);
-    window.addEventListener("online", on);
-    window.addEventListener("offline", off);
-    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+    let active = true;
+    const probe = async () => {
+      try { const r = await fetch("/health", { cache: "no-store", signal: AbortSignal.timeout(3000) }); if (active) setOnline(r.ok); }
+      catch { if (active) setOnline(false); }
+    };
+    void probe();
+    const timer = window.setInterval(() => { void probe(); }, 10000);
+    return () => { active = false; window.clearInterval(timer); };
   }, []);
 
   const [toast, setToast] = useState("");
@@ -1472,11 +1473,10 @@ export function App() {
 
   return (
     <div className="min-h-screen bg-[var(--bg)] pb-24">
-      <SafeAreaTopScrim backgroundColor="var(--bg)" />
       {toast && <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] max-w-[92vw] rounded-2xl bg-[var(--text)] text-[var(--bg)] text-sm font-semibold px-4 py-3 shadow-lg">{toast}</div>}
       {!online && (
         <div className="sticky top-0 z-50 bg-[var(--red)] text-white px-4 py-3 flex items-center justify-between gap-3">
-          <p className="text-sm font-bold">⚠ Mất kết nối mạng — kiểm tra mạng rồi bấm Thử lại</p>
+          <p className="text-sm font-bold">⚠ Chưa kết nối được ứng dụng trên máy — hãy mở lại bằng nút Mở kho</p>
           <button className="shrink-0 rounded-lg bg-white text-[var(--red)] font-bold text-sm px-3 py-1.5" onClick={() => qc.invalidateQueries()}>Thử lại</button>
         </div>
       )}
