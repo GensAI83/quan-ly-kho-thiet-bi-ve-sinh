@@ -32,6 +32,27 @@ App quản lý kho thiết bị vệ sinh — nhập/xuất kho, tồn kho, lị
 - **Khôi phục:** chỉ quản trị, trong tab **Nhân viên & Sao lưu**, chọn snapshot → xác nhận 2 lần (lần 2 phải gõ đúng `KHOI PHUC`). Khôi phục sẽ ghi đè toàn bộ dữ liệu kho/đơn/phiếu/công nợ bằng snapshot. Tài khoản nhân viên hiện tại được giữ nguyên (không mất PIN); nhân viên chỉ có trong snapshot sẽ nhận PIN mặc định `123456` và phải đổi PIN ở lần đăng nhập đầu.
 - File sao lưu JSON **không chứa mã PIN** (chỉ tên, vai trò, trạng thái).
 
+## Bản chạy trực tiếp trên máy tính (standalone)
+
+Ngoài bản chạy trên Muse, repo có sẵn bản chạy trực tiếp trên máy tính
+Windows bằng Bun + file SQLite, trong thư mục `standalone/` — xem hướng dẫn
+đầy đủ trong [`standalone/README.md`](standalone/README.md). Tóm tắt:
+
+```bash
+cd standalone
+bun install
+bun run build
+bun run start        # hoặc đúp start.bat — mở http://127.0.0.1:3000
+```
+
+PIN mặc định `123456` (bắt buộc đổi ở lần đăng nhập đầu). Dữ liệu nằm trong
+`standalone/data/warehouse.db`.
+
+> **Hai bản dùng database riêng, không đồng bộ với nhau.** Muốn mang dữ liệu
+> từ app Muse sang bản standalone: xuất sao lưu JSON trong app Muse (tab
+> **Nhân viên & Sao lưu**) rồi dùng chức năng **Khôi phục** trong bản
+> standalone để nạp file đó (và ngược lại).
+
 ## Cấu trúc mã nguồn
 
 - `client/` — giao diện React + TypeScript (`client/src/App.tsx` là màn hình chính)

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" href="data:," />
+    <title>Quản lý kho thiết bị vệ sinh</title>
+    <link rel="stylesheet" href="/app.css" />
+    <style>
+      /* Container CSS tương đương SDK styles.css của Muse (shim không có
+         file styles.css nên trang host tự mang theo). Biến safe-area lấy từ
+         env() để màn hình có tai thỏ / thanh cử chỉ không bị che nội dung. */
+      :root {
+        color-scheme: light dark;
+        --twsa-safe-area-inset-top: env(safe-area-inset-top, 0px);
+        --twsa-safe-area-inset-right: env(safe-area-inset-right, 0px);
+        --twsa-safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
+        --twsa-safe-area-inset-left: env(safe-area-inset-left, 0px);
+      }
+      html,
+      [data-generated-space-root] {
+        height: 100%;
+        min-height: 100%;
+      }
+      [data-generated-space-root] {
+        inset: 0;
+        overflow: auto;
+        position: fixed;
+        scrollbar-width: none;
+      }
+      .hatch-space-root[data-hatch-space-root] {
+        --hatch-space-bottom-padding: calc(
+          var(--bottom-padding, 0px) + env(safe-area-inset-bottom, 0px)
+        );
+        box-sizing: border-box;
+        min-height: calc(
+          100% + var(--header-height, 0px) + var(--hatch-space-bottom-padding)
+        );
+        min-height: calc(
+          100dvh + var(--header-height, 0px) + var(--hatch-space-bottom-padding)
+        );
+        padding-top: var(--header-height, 0px);
+        padding-bottom: var(--hatch-space-bottom-padding);
+        background: var(--bg, #f4f7fb);
+        color: var(--text, #0f172a);
+      }
+      [data-generated-space-root]::-webkit-scrollbar {
+        display: none;
+      }
+    </style>
+    <script src="/app.js" type="module"></script>
+  </head>
+  <body>
+    <div
+      data-generated-space-root=""
+      class="hatch-space-root"
+      data-hatch-space-root=""
+      data-generated-space-slug="quan-ly-kho-thiet-bi-ve-sinh"
+    ></div>
+  </body>
+</html>

@@ -1,4 +1,168 @@
-# CHANGES.md — Nhật ký thay đổi (bản nâng cấp 2026-11-09, đợt 2 ngày 2026-11-10, đợt 3 ngày 2026-11-10, đợt tiền phiếu ngày 2026-11-10)
+# CHANGES.md — Nhật ký thay đổi (bản nâng cấp 2026-11-09, đợt 2 ngày 2026-11-10, đợt 3 ngày 2026-11-10, đợt tiền phiếu ngày 2026-11-10, bản standalone ngày 2026-11-10)
+
+## Bản chạy trực tiếp trên máy tính — standalone (ngày 2026-11-10) — xem `TEST_RESULTS.md` mục J
+
+Thêm thư mục `standalone/` để chạy app trực tiếp trên máy Windows bằng Bun +
+file SQLite, không cần Muse, không cần mạng. **Không sửa hành vi bản Muse:**
+`client/src/App.tsx`, `server/src/actions.ts`, `server/src/schema.ts`,
+`client/src/main.tsx`, `client/src/api.ts`, `drizzle/*.sql` giữ nguyên
+(xác minh bằng `git status`: chỉ có các file đã sửa từ trước phiên này).
+
+### Kiến trúc
+
+- **Dùng chung code nghiệp vụ, không copy.** `standalone/` import trực tiếp
+  `../../client/src/main.tsx`, `../../server/src/actions` và
+  `../../server/src/schema`, chạy migration từ `drizzle/0001..0005.sql`.
+- **`standalone/shim/space-sdk/` — package local `@hatch/space-sdk` 0.14.0**
+  (`file:./shim/space-sdk` trong `standalone/package.json`), triển khai tối
+  thiểu bề mặt SDK mà code dùng, khớp hành vi SDK thật đã đọc từ
+  `space-sdk.tgz` (`dist/client.js`, `dist/server-contract.js`,
+  `dist/client/safe-area.js`, `styles.css`):
+  - Server (`dist/index.js` + `index.d.ts`): `z` (re-export từ zod),
+    `defineAction` trả `{ __brand: "@hatch/space-sdk/action/v1", request,
+    response, description?, handler }`, `isAction`,
+    `actionDescription` (gộp whitespace, cắt 300 ký tự), các type
+    `ActionDefinition`, `ActionsModule`, `SpaceDb`
+    (= `Pick<LibSQLDatabase, "select"|"insert"|"update"|"delete"|"run"|"all"|"get"|"batch">`),
+    `SpaceDbAccessor`, `Ctx`, `PortableCtx`.
+  - Client (`dist/client.js` + `client.d.ts`): `createActionClient` khớp
+    đúng wire protocol — POST `./actions` (resolve theo `location.href`),
+    body `{ action, args, actionCallId }`, header `x-request-id`; 200 trả
+    `{ data }` (body 200 có `error` truthy thì ném
+    `Error("action <tên> error: ...")`); non-OK ném `SpaceActionError`
+    với message `action <tên> failed: <status> <body JSON>`.
+    `SpaceActionError` (status, retryAfterMs, retrySafe, code),
+    `PERMANENT_ACTION_STATUSES` (400/401/403/404/409/413/415/422),
+    `MAX_ACTION_RETRIES = 3`, `shouldRetryAction` (chỉ retry lỗi
+    `retrySafe` và `failureCount < 3`, không retry status vĩnh viễn),
+    `actionRetryDelay` (backoff mũ + jitter, floor theo `Retry-After`),
+    `spaceQueryClient` (`retry: shouldRetryAction`, `retryDelay:
+    actionRetryDelay`, `staleTime: 30000`, `refetchOnWindowFocus: false`),
+    `SafeAreaTopScrim` (render đúng div fixed như thật: gradient mặc định
+    với mask, solid/blur, `zIndex` mặc định 40, `aria-hidden`),
+    `getSpaceViewer` → `Promise.resolve(null)`,
+    `subscribeSpaceViewer` → unsubscribe no-op, `useSpaceViewer` → `null`,
+    `bytesToBase64`/`fileToBase64`. Không import `../styles.css`.
+    Có chuỗi đánh dấu `space-sdk-shim/1.0` (`STANDALONE_SHIM_MARKER`,
+    kèm gán `globalThis.__standaloneShim` để bundler không tree-shake mất)
+    — kiểm chứng bằng `grep` trên bundle.
+  - Cố tình KHÔNG triển khai: viewer context (`./_viewer`, broadcast
+    invalidate liên-client, auth-refresh qua postMessage, host theme),
+    privileged contracts, inference/tool/agent, PDF, icons.
+- **`standalone/server/index.ts`** — `Bun.serve` (bind `127.0.0.1`, cổng
+  `PORT`, mặc định 3000; DB `standalone/data/warehouse.db`, đổi qua
+  `DB_PATH`): chạy migration 0001→0005 với bảng `__migrations` (chỉ chạy
+  file chưa chạy, dùng `client.executeMultiple` như harness);
+  `POST /actions` tìm action trong `Actions`, validate args bằng request
+  zod schema (`safeParse`, lỗi → 400 tiếng Việt ghi rõ tên action + lỗi
+  zod đầu tiên), gọi handler với ctx `{ slug, invocationId, spaceDir, db:
+  () => db, invalidateQueries: () => {} }`, trả `{ data }`; handler ném
+  lỗi → 500 `{error: message}` (không lộ stack); action không tồn tại →
+  404. Phục vụ file tĩnh `standalone/dist/` (`/`, `/app.js`, `/app.css`,
+  `/assets/*`). Log khi khởi động: cổng, đường dẫn DB, số migration đã áp
+  trong lần chạy này + tổng số đã áp.
+- **`standalone/client/index.html`** — host page: `<div
+  data-generated-space-root class="hatch-space-root"
+  data-hatch-space-root>`, nạp `/app.js` + `/app.css` (đường dẫn tuyệt
+  đối), kèm `<style>` inline chứa CSS container tương đương SDK
+  `styles.css` (biến `--twsa-safe-area-inset-*`, root fixed full-height,
+  `.hatch-space-root` dùng `var(--bg)`/`var(--text)`).
+- **`standalone/scripts/build-client.ts`** (`bun run build`): `Bun.build`
+  entrypoint `../../client/src/main.tsx`, outdir `standalone/dist`,
+  `target: "browser"`, `minify`, `define NODE_ENV production`, naming
+  `app.[ext]` / `assets/[name]-[hash].[ext]`, plugin `bun-plugin-tailwind`,
+  copy `client/index.html` → `dist/index.html`, kiểm tra `app.js`/`app.css`
+  tồn tại và không rỗng. Xem mục "Hai phát hiện khi triển khai" bên dưới
+  về lý do script dùng plugin `onResolve` thay cho `alias`, và về liên kết
+  `client/node_modules`.
+- **`standalone/smoke-test.ts`** (`bun run smoke`): spawn server thật trên
+  cổng tạm + DB tạm, 26 kiểm tra (trang chủ/bundle, PIN, phiếu nhập batch,
+  đơn, trả hàng + thu nợ, auth/404/400, snapshot/khôi phục, migration
+  idempotent) — xem `TEST_RESULTS.md` mục J.
+- **`standalone/start.bat`** (CRLF, `%~dp0`): kiểm tra `bun`, build nếu
+  chưa có `dist/app.js`, chạy server, mở `http://127.0.0.1:3000`.
+- **`standalone/package.json`**: chỉ gói npm công khai +
+  `"@hatch/space-sdk": "file:./shim/space-sdk"` (không tham chiếu
+  `/opt/hatch` — đã kiểm chứng bằng `grep`). Scripts: `build`, `start`,
+  `smoke`, `typecheck` (typecheck code standalone + shim qua
+  `standalone/tsconfig.json`, 0 lỗi).
+- **`.gitignore`**: thêm `standalone/data/*.db`, `standalone/dist/`,
+  `standalone/node_modules/`.
+
+### Hai phát hiện khi triển khai (đã xác minh bằng thử nghiệm, không đoán)
+
+1. **Resolve phía server cần `NODE_PATH`.** `server/src/actions.ts` import
+   `@hatch/space-sdk` và `drizzle-orm` nhưng nằm NGOÀI `standalone/`, nên
+   Bun resolve bằng cách đi lên từ `server/src/` và không bao giờ thấy
+   `standalone/node_modules`. Trên máy chỉ cài `standalone/`, import này
+   lỗi `Cannot find module '@hatch/space-sdk'` (đã tái hiện). `tsconfig
+   paths` không cứu được (Bun ưu tiên `server/tsconfig.json` gần file
+   import nhất), plugin `Bun.plugin` + `onResolve` cũng không can thiệp
+   được runtime resolve của Bun 1.4.4. Cách sửa: script `start` chạy với
+   `NODE_PATH=./node_modules` (Bun tôn trọng `NODE_PATH` làm đường tìm
+   kiếm dự phòng — đã kiểm chứng cả đường tuyệt đối lẫn tương đối), và
+   smoke test truyền `NODE_PATH` tuyệt đối khi spawn server. `start.bat`
+   cũng `set NODE_PATH=%~dp0node_modules`.
+2. **`Bun.build` `alias` không áp dụng cho entry ngoài thư mục build, và
+   Tailwind Oxide không tôn trọng `NODE_PATH`.** Trong Bun 1.4.4, `alias`
+   với giá trị là file bị lặng lẽ bỏ qua, với giá trị là thư mục chỉ áp
+   dụng cho file nằm dưới thư mục build — entry `../../client/src/main.tsx`
+   không được áp alias (đã thử cả `root`, cả đường tương đối/tuyệt đối).
+   Vì vậy `build-client.ts` dùng plugin `onResolve`: redirect
+   `@hatch/space-sdk(/client)` sang shim, và fallback mọi bare import
+   khác về `standalone/node_modules` qua `createRequire` (đảm bảo 1 bản
+   copy React). Riêng CSS: Tailwind Oxide resolve `@import "tailwindcss"`
+   trong `theme.css` bằng cách đi lên từ `client/src/` và cũng không tôn
+   trọng `NODE_PATH`/plugin — build lỗi `Can't resolve 'tailwindcss'`
+   trong môi trường mô phỏng Windows (đã tái hiện). Cách sửa: script
+   build tự tạo liên kết `client/node_modules` →
+   `../standalone/node_modules` (junction trên Windows — không cần quyền
+   admin; symlink trên POSIX) khi nó chưa tồn tại, và **gỡ lại ngay sau
+   khi build xong** (khối `finally` trong `build-client.ts`). Liên kết chỉ
+   tồn tại trong lúc build: nếu để sót lại, mọi lần resolve từ `client/src/`
+   (vd typecheck phía Muse) sẽ thấy shim thay vì SDK thật — đã xác minh
+   bằng thử nghiệm rằng build vẫn cho ra bundle giống hệt byte (md5
+   `app.js`/`app.css` không đổi) sau khi đổi sang gỡ tạm. Thư mục này đã
+   gitignore nên không có file tracked nào thay đổi. Đây là lần ghi duy
+   nhất của build ra ngoài `standalone/`, và nó được dọn sạch sau mỗi
+   lần build.
+
+### Sửa sau khi kiểm chứng độc lập (coordinator, ngày 2026-11-10)
+
+1. **Liên kết `client/node_modules` giờ chỉ tồn tại trong lúc build**
+   (tạo → build → gỡ trong `finally`). Trước đó build để sót liên kết,
+   làm lần resolve từ `client/src/` thấy shim thay vì SDK thật. Bundle
+   sau sửa giống hệt byte (md5 không đổi).
+2. **`.gitignore` thêm `!standalone/shim/space-sdk/dist/`**: quy tắc
+   `dist/` vô tình loại cả `dist/` viết tay của shim (không có nguồn
+   `.ts` để build lại) — nếu không ngoại lệ này, bản đẩy lên GitHub sẽ
+   thiếu 4 file shim và bản clone về lỗi `Cannot find module`. Đã kiểm
+   chứng bằng mô phỏng dựng từ đúng 57 file trong manifest
+   (xem `TEST_RESULTS.md` mục J8): install → build → smoke → start đều
+   chạy được.
+
+### Khác biệt hành vi so với bản Muse (đã biết)
+
+- **Lỗi do handler ném (kể cả lỗi auth "Cần đăng nhập…") trả HTTP 500**
+  thay vì mã riêng — theo đúng thiết kế đã chốt cho server standalone
+  (handler ném lỗi → 500 `{error: message}`). Client hiển thị đúng thông
+  báo vì `SpaceActionError.message` chứa nguyên body JSON; chính sách
+  retry không retry lại vì server không bao giờ đặt `retrySafe`.
+- **`ctx.invalidateQueries()` là no-op phía server**: không có broadcast
+  liên-client. Trong thực tế không ảnh hưởng vì client tự
+  `qc.invalidateQueries()` trong `onSuccess` của mutation; mở 2 tab cùng
+  lúc thì tab kia chỉ cập nhật khi refetch (staleTime 30s hoặc chuyển tab
+  — refetchOnWindowFocus vẫn tắt như bản Muse).
+- **Không có viewer context / host theme**: `getSpaceViewer()` luôn `null`,
+  không có đồng bộ liên-client, không có dark mode theo host — chỉ theo
+  `prefers-color-scheme` của trình duyệt (như `theme.css` gốc).
+- **Một server = một file DB, một máy**: không đồng bộ với app Muse, không
+  chạy 2 máy cùng lúc. Hai tab trên cùng máy dùng chung server nên không
+  xung đột như hai máy riêng.
+- **Chưa kiểm chứng render trình duyệt thật trên máy ảo** (Chromium có sẵn
+  chặn điều hướng tới localhost theo chính sách Local Network Access của
+  nó; xem `TEST_RESULTS.md` mục J). Người dùng kiểm chứng trên Windows
+  theo checklist trong `standalone/README.md`.
 
 ## Sửa lỗi tiền phiếu — gộp theo SP làm mất đơn giá dòng (ngày 2026-11-10) — xem `TEST_RESULTS.md` mục I
 

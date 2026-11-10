@@ -314,3 +314,179 @@ Số liệu kiểm chứng trong harness (đúng kịch bản đã báo):
   tồn 10, 0 phiếu còn lại; huỷ đơn confirmed 2 dòng giá khác nhau → phiếu hoàn 300.000đ
   (8 → 9, 9 → 10), tồn về 10, đơn cancelled; huỷ giữ đơn reserved 2 dòng giá khác nhau →
   phiếu hoàn 300.000đ, tồn về 10, `reservedQty` 0, đơn cancelled.
+
+## J. Bản standalone — Bun + SQLite file (ngày 2026-11-10)
+
+Môi trường kiểm chứng: máy ảo Linux, Bun 1.4.4. Toàn bộ lệnh chạy từ
+`standalone/` trừ khi ghi khác. Không đẩy GitHub, không sửa sync record.
+
+### J1. Cài đặt từ trạng thái sạch
+
+- `rm -rf node_modules` rồi `bun install`: thành công, **79 packages**,
+  `Saved lockfile`. `grep -r "opt/hatch" standalone/package.json
+  standalone/shim` trống (không tham chiếu `/opt/hatch`).
+- `bun run typecheck` (standalone): **0 lỗi** (typecheck code standalone +
+  shim qua `standalone/tsconfig.json`).
+
+### J2. Build client
+
+- `bun run build`: thành công — `dist/app.js` **1.109,7 KB**,
+  `dist/app.css` **25,5 KB**, `dist/index.html` đã copy.
+- `app.css` chứa utilities Tailwind (`.flex{display:flex}`).
+- `grep -c "space-sdk-shim/1.0" dist/app.js` = **1** (chuỗi đánh dấu của
+  shim còn trong bundle sau minify); `grep -c` các chuỗi SDK thật đều
+  **0**: `hatch:space:query-invalidated`, `space-action-auth-refresh`,
+  `space_unavailable`, `opt/hatch` — chứng minh bundle dùng shim, không
+  dùng SDK thật.
+- Lỗi đã gặp và đã sửa trong lúc build (xem `CHANGES.md`): `Bun.build`
+  `alias` không áp dụng cho entry ngoài thư mục build (đã đổi sang plugin
+  `onResolve`); Tailwind Oxide không resolve được `@import "tailwindcss"`
+  khi không có `node_modules` trên đường đi lên từ `client/src/`
+  (script build nay tự tạo liên kết tạm `client/node_modules` →
+  `../standalone/node_modules` trong lúc build rồi gỡ lại ngay sau khi
+  build xong — bundle sau khi đổi vẫn giống hệt byte, md5 `app.js`
+  `0c9b3291…`, `app.css` `65fe41bf…`).
+
+### J3. Migration trên DB file
+
+- Khởi động server với DB tạm (`DB_PATH=/tmp/test-wh.db`, cổng 31234):
+  log `Migration: đã áp 5 file trong lần chạy này, tổng 5/5 file đã áp.`
+- Kiểm tra trực tiếp bằng SQLite: **18 bảng** (17 bảng nghiệp vụ +
+  `sqlite_sequence`; bảng `entries` của 0001 đã bị `DROP` có chủ đích ở
+  đầu 0002) + index `debts_one_active_per_ref` có mặt + bảng
+  `__migrations` đủ 5 dòng 0001→0005.
+- `loginStaff` PIN 123456 qua HTTP thật: `ok: true`, `mustChangePin: 1`.
+
+### J4. Smoke test end-to-end (`bun run smoke`)
+
+**26/26 PASS, 0 FAIL** (chạy ngày 2026-11-10, cổng tạm, DB tạm trong
+`os.tmpdir()`, tự xóa sau khi chạy):
+
+| Mục | Kết quả |
+|---|---|
+| Khởi động server, GET / 200 | PASS |
+| 1a. GET / chứa `data-generated-space-root` | PASS (2.195 ký tự) |
+| 1b. GET /app.js 200, không rỗng | PASS (1.130.683 ký tự) |
+| 1c. GET /app.css 200, chứa utilities Tailwind | PASS (26.162 ký tự) |
+| 2a. Login PIN 123456 → ok, có token, mustChangePin = 1 | PASS |
+| 2b. Đổi PIN sang 654321 → ok | PASS |
+| 2c. Login PIN mới được | PASS |
+| 2d. Login PIN cũ không được | PASS (`Mã PIN không đúng.`) |
+| 3. Tạo SP (nhập 50, bán 100, tồn đầu 10) → ok | PASS (id=1, sku=BC-0558) |
+| 4. Phiếu nhập batch 1×100.000đ + 1×200.000đ → todayInValue tăng đúng 300.000đ | PASS (500 → 300.500) |
+| 5a. Tạo đơn confirmed 2 dòng cùng SP → ok | PASS (DH20261110-9689) |
+| 5b. Tổng tiền đơn 300.000đ, tồn 12 → 10, phiếu xuất 300.000đ | PASS |
+| 6a. Trả 1 dòng (100.000đ) → ok | PASS (`partially_returned`) |
+| 6b. Sau trả một phần, công nợ còn 200.000đ | PASS |
+| 6c. Thu đủ 200.000đ → ok, remaining 0 | PASS |
+| 6d. Đơn `paid`, công nợ còn 0 | PASS |
+| 7a. `listProducts` không token → lỗi chứa "Cần đăng nhập" | PASS (HTTP 500, xem lưu ý dưới) |
+| 7b. Action không tồn tại → 404 | PASS |
+| 7c. `loginStaff` không pin → 400 | PASS (`Dữ liệu gửi lên không hợp lệ cho loginStaff: pin: Invalid input: expected string, received undefined.`) |
+| 8a. Tạo snapshot sao lưu → ok | PASS (id=1, size=6.043) |
+| 8b. Tạo SP sau snapshot → ok | PASS (id=2) |
+| 8c. Khôi phục snapshot → ok | PASS |
+| 8d. Sau khôi phục: SP trước snapshot còn, SP sau snapshot mất | PASS (1 SP) |
+| 9a. Khởi động lần 2 trên cùng DB → server lên | PASS |
+| 9b. Dữ liệu còn nguyên (số SP trước/sau bằng nhau) | PASS (1 = 1) |
+| 9c. `__migrations` không tăng (5 = 5) | PASS |
+
+Lưu ý: mục 7a trả HTTP **500** theo đúng thiết kế server standalone
+(handler ném lỗi → 500 `{error: message}`); client vẫn hiển thị đúng
+thông báo tiếng Việt vì `SpaceActionError.message` chứa nguyên body JSON,
+và không có retry lại vì server không đặt `retrySafe`.
+
+### J5. Mô phỏng máy Windows sạch
+
+Copy toàn bộ repo sang `/tmp/win-sim` **không kèm `node_modules` gốc**
+(đúng như máy Windows chỉ tải ZIP/clone rồi `cd standalone`):
+
+- `bun install` (xóa `bun.lock` trước): thành công, 79 packages.
+- `bun run build`: **thành công** (sau khi thêm liên kết
+  `client/node_modules` — trước đó lỗi `Can't resolve 'tailwindcss'`,
+  đã sửa). Bundle **giống hệt byte** với bản build ở repo chính
+  (md5 `app.js` 0c9b3291bd64ef8adc63f442d7decc00, `app.css`
+  65fe41bf271ada8a54ff15aebbe378b4).
+- `bun run smoke`: **26/26 PASS**.
+- `bun run typecheck` (standalone): **0 lỗi**.
+- `bun run start` (cổng 31236, DB mặc định `standalone/data/warehouse.db`):
+  lần 1 log `đã áp 5 file… tổng 5/5`, GET / 200, login PIN 123456 ok;
+  lần 2 log `đã áp 0 file… tổng 5/5` (không chạy lại migration cũ).
+
+### J6. Không hồi quy bản Muse (chạy lại ngày 2026-11-10)
+
+- `bun run typecheck` (gốc, client + server): **0 lỗi**.
+- `bun tests/repro-5-bugs.ts`: **42/42 PASS**.
+- `bun tests/repro-4-bugs.ts`: **18/18 PASS**.
+- `bun tests/repro-2-bugs-round3.ts`: **12/12 PASS**.
+- `bun tests/repro-money-batch.ts`: **14/14 PASS**.
+- `git status` xác nhận không sửa file chung: `client/src/App.tsx`,
+  `server/src/actions.ts`, `server/src/schema.ts`, `client/src/main.tsx`,
+  `client/src/api.ts`, `drizzle/*.sql` giữ nguyên (các file này đã có sửa
+  đổi chưa commit từ các phiên trước, không phải từ phiên standalone này).
+
+### J8. Kiểm chứng độc lập của coordinator + 2 lỗi đã sửa sau khi kiểm chứng
+
+Người điều phối đã chạy lại toàn bộ bằng tay (không tin báo cáo của
+worker con) và sửa 2 lỗi tìm thấy:
+
+1. **Liên kết `client/node_modules` bị để sót lại sau mỗi lần build.**
+   Script build tạo liên kết này để Tailwind tìm thấy gói, nhưng không gỡ
+   lại — liên kết còn sót sẽ làm mọi lần resolve từ `client/src/` (vd
+   typecheck phía Muse) thấy shim thay vì SDK thật. Đã sửa:
+   `build-client.ts` giờ tạo liên kết TẠM trong lúc build rồi gỡ trong
+   khối `finally`. Sau sửa: build vẫn thành công, bundle **giống hệt
+   byte** (md5 `app.js`/`app.css` không đổi), `client/node_modules`
+   không còn tồn tại sau build.
+2. **`.gitignore` (quy tắc `dist/`) vô tình loại cả `dist/` của shim.**
+   Shim chỉ có file `.js`/`.d.ts` viết tay trong `dist/` (không có nguồn
+   `.ts` để build lại), mà `package.json` của shim trỏ `main`/`types`
+   vào đó — nếu đẩy theo manifest (`git ls-files --exclude-standard`)
+   thì 4 file này sẽ bị rớt, bản clone về sẽ lỗi `Cannot find module`
+   khi chạy. Đã sửa: thêm `!standalone/shim/space-sdk/dist/` vào
+   `.gitignore` (đứng sau quy tắc `dist/`). Đã kiểm chứng bằng
+   `git check-ignore`: 4 file shim không còn bị ignore, và manifest
+   (57 file) đã bao đủ chúng.
+
+**Mô phỏng máy Windows sạch từ đúng tập file sẽ đẩy GitHub** (không phải
+copy cả thư mục làm việc): dựng `/tmp/win-sim2` chỉ từ 57 file trong
+manifest (`git ls-files --cached --others --exclude-standard`), rồi chạy
+đúng luồng người dùng — `bun install`: 79 packages OK; `bun run build`:
+OK, liên kết tạm được tạo rồi gỡ, md5 bundle giống hệt repo chính;
+`bun run smoke`: **26/26 PASS**; `bun run start` (cổng 31411, DB tạm):
+lần 1 `đã áp 5 file… tổng 5/5`, GET / 200, `loginStaff` PIN 123456 →
+`ok: true, mustChangePin: 1`; lần 2 `đã áp 0 file… tổng 5/5`;
+`bun run typecheck` (standalone): **0 lỗi**.
+
+Sau 2 sửa trên, chạy lại ở repo chính: smoke **26/26 PASS**,
+typecheck standalone **0 lỗi**, typecheck gốc **0 lỗi**,
+`tests/repro-money-batch.ts` **14/14 PASS**. Các harness còn lại đã chạy
+ở J6 (42/42, 18/18, 12/12) và không bị ảnh hưởng vì không sửa file chung.
+
+### J7. Chưa kiểm chứng được
+
+- **Render trình duyệt thật trên máy ảo: CHƯA.** Chromium có sẵn
+  (`/opt/meta-chromium/chrome` + `playwright-core` 1.55.1) khởi động được
+  (cần policy file WebGL domain), nhưng mọi điều hướng tới
+  `http://localhost:<cổng>/` đều bị chặn với
+  `net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS` — chính sách Local
+  Network Access của bản Chromium này — dù đã thử các flag
+  `--disable-features=LocalNetworkAccessChecks,
+  BlockInsecurePrivateNetworkRequests,…`, bộ flag hardening của
+  `playwright-audit.js` (kể cả tắt `HatchFortress`) và
+  `ignoreDefaultArgs`. Coordinator thử lại bằng tay: bản Chromium này
+  thậm chí không khởi động được nếu thiếu file policy WebGL domain
+  (`Hatch WebGL domain policy is required for browser startup`), và
+  không tìm thấy file policy đó trên máy ảo. Không tìm cách vượt qua cơ
+  chế này. Bù lại: bundle đã kiểm chứng (J2), API qua HTTP thật đã kiểm
+  chứng (J4), và luồng Windows đã kiểm chứng (J5, J8). **Người dùng kiểm
+  chứng render trên máy Windows thật** theo checklist trong
+  `standalone/README.md` (mở `http://127.0.0.1:3000`, đăng nhập PIN
+  123456, đổi PIN, kiểm tra Tổng quan/Sản phẩm/Đơn hàng hiển thị đúng).
+- **`start.bat` chưa chạy thử trên Windows thật** (chỉ kiểm chứng logic:
+  CRLF, `%~dp0`, kiểm tra `bun`, build khi thiếu `dist/app.js`,
+  `NODE_PATH`, mở trình duyệt). Lệnh `mklink /J` dự phòng chỉ ghi trong
+  cảnh báo của script build, chưa cần dùng tới.
+- Hai người dùng đồng thời trên bản standalone chưa thử qua trình duyệt
+  (chỉ có smoke test đơn luồng); giới hạn này giống bản Muse và đã ghi
+  trong `TESTING.md`.

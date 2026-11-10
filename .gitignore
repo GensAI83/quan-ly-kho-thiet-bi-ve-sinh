@@ -9,3 +9,13 @@ server/dist/
 app.db
 *.tsbuildinfo
 *.muse-github-snapshot-sync.json
+# Bản standalone (Bun + SQLite file): database local, bản build, gói đã cài.
+standalone/data/*.db
+standalone/dist/
+standalone/node_modules/
+# NGOẠI LỆ: dist/ của shim là mã nguồn viết tay (không có file .ts nguồn,
+# không tự build lại được) — package.json của shim trỏ main/types vào đó,
+# nên PHẢI commit lên GitHub, nếu không bản clone về sẽ thiếu file và
+# `bun install`/`bun run start` lỗi "Cannot find module". Dòng này phải
+# đứng SAU quy tắc `dist/` ở trên mới có hiệu lực.
+!standalone/shim/space-sdk/dist/
