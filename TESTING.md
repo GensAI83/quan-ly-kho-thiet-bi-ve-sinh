@@ -123,7 +123,26 @@ Chạy thử trước khi dùng app cho bán hàng thật. Chuẩn bị: đăng 
   trả mỗi dòng 1 cái → tồn tăng đúng 2 (7 → 9), đúng 1 phiếu nhập trả hàng số lượng 2,
   mỗi dòng hiển thị "đã trả 1".
 
-### 7d. Sau các thao tác trên
+### 7d. Kiểm tra lỗi tiền phiếu (mới ngày 2026-11-10)
+
+> Harness `tests/repro-money-batch.ts` đã kiểm chứng ở mức code (14/14 PASS) — các bước
+> dưới đây kiểm tra lại trên trình duyệt thật. Kết quả xem ở `TEST_RESULTS.md` mục G/I.
+
+- [ ] Phiếu nhập 2 dòng cùng sản phẩm, giá khác nhau: tạo phiếu nhập gồm 2 dòng cùng 1 sản
+  phẩm, mỗi dòng 1 cái, đơn giá dòng 1 = 100.000đ, dòng 2 = 200.000đ, tồn trước 10 → ghi
+  phiếu → tồn phải là **12**, tab Lịch sử phải hiện **2 dòng phiếu** cùng mã PN (dòng 1:
+  10 → 11, 100.000đ; dòng 2: 11 → 12, 200.000đ), tổng tiền phiếu **300.000đ** (không phải
+  200.000đ); tab Tổng quan "Nhập hôm nay" tăng đúng 300.000đ. (Trước sửa: chỉ 1 phiếu gộp
+  2 × 100.000đ = 200.000đ.)
+- [ ] Phiếu xuất tương tự (2 dòng cùng sản phẩm, 100.000đ + 200.000đ) → tồn giảm đúng 2,
+  "Xuất hôm nay" tăng đúng 300.000đ; in 1 dòng phiếu trong Lịch sử → tổng tiền in đúng
+  theo dòng đó (100.000đ hoặc 200.000đ), không phải tổng gộp.
+- [ ] Đơn hàng 2 dòng cùng sản phẩm giá khác nhau: tạo đơn đã xác nhận 1 × 100.000đ +
+  1 × 200.000đ → tổng tiền đơn 300.000đ, Lịch sử có 2 phiếu xuất (10 → 9, 9 → 8) tổng
+  300.000đ; trả hết cả 2 dòng → 2 phiếu nhập trả hàng tổng 300.000đ, tồn về đúng số cũ,
+  công nợ còn 0đ.
+
+### 7e. Sau các thao tác trên
 
 - [ ] Tab Kiểm kê → "Đối chiếu tồn kho": danh sách lệch phải rỗng sau các thao tác đúng;
   nếu có lệch, kiểm tra tab Tổng quan → mục "Chờ hoàn kho" có bản ghi sửa chữa ghi rõ

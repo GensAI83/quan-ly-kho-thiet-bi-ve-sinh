@@ -1,4 +1,112 @@
-# CHANGES.md — Nhật ký thay đổi (bản nâng cấp 2026-11-09, đợt 2 ngày 2026-11-10, đợt 3 ngày 2026-11-10)
+# CHANGES.md — Nhật ký thay đổi (bản nâng cấp 2026-11-09, đợt 2 ngày 2026-11-10, đợt 3 ngày 2026-11-10, đợt tiền phiếu ngày 2026-11-10)
+
+## Sửa lỗi tiền phiếu — gộp theo SP làm mất đơn giá dòng (ngày 2026-11-10) — xem `TEST_RESULTS.md` mục I
+
+Harness tái hiện mới: `tests/repro-money-batch.ts` (`bun tests/repro-money-batch.ts`, Bun + SQLite
+trong bộ nhớ, không sửa `tests/repro-4-bugs.ts`, `tests/repro-5-bugs.ts` và
+`tests/repro-2-bugs-round3.ts`). Trước sửa: **4 PASS / 8 FAIL** (log ở
+`tests/repro-money-before-fix.log`); sau sửa: **14 PASS / 0 FAIL** (log ở
+`tests/repro-money-after-fix.log`). Harness cũ chạy lại: đợt 3 **12/12 PASS**, đợt 2 **18/18 PASS**,
+đợt 1 **42/42 PASS** (không hồi quy). Không có migration mới (không cần đổi schema).
+
+Lưu ý trung thực: log trước sửa có 12 kiểm tra, log sau sửa có 14 — kiểm tra 3c (huỷ đơn
+confirmed 2 dòng cùng SP giá khác nhau) và 3d (huỷ giữ đơn reserved 2 dòng cùng SP giá khác
+nhau) được thêm cùng lúc với bản sửa cho nhánh huỷ đơn của `updateOrderStatus` và
+`releaseReservation`; hành vi lỗi của chúng trước sửa suy ra từ cùng mẫu "lấy giá dòng đầu"
+đã chứng minh FAIL ở 1a/2a/2b/2c-1 (phiếu gộp 2 × 100.000đ = 200.000đ thay vì 300.000đ).
+
+### Gốc rễ — HỒI QUY do đợt 3 gộp phiếu theo sản phẩm (đã xác minh trong code)
+
+Đợt 3 gộp phiếu theo `productId` để mỗi sản phẩm chỉ 1 lần `applyStock` (đúng cho tồn), nhưng
+phiếu gộp lấy `unitCost`/`unitPrice` từ DÒNG ĐẦU TIÊN của sản phẩm đó — trước đợt 3 mỗi dòng có
+phiếu riêng với đúng đơn giá của nó nên tiền đúng. Ví dụ: phiếu nhập 2 dòng cùng SP, mỗi dòng
+1 cái, 100.000đ + 200.000đ → phiếu gộp ghi 2 cái × 100.000đ = **200.000đ** thay vì **300.000đ**.
+Tiền phiếu (quantity × unitCost) đi vào dashboard (`getDashboard` dòng ~494-495:
+`todayInValue`/`todayOutValue` = Σ quantity × unitCost theo phiếu) nên Tổng quan cũng sai theo.
+Các vị trí đã xác minh (đều cùng mẫu `items.find((i) => i.productId === ...)?.unitPrice ?? 0`
+hoặc `g.first...unitPrice`):
+
+- `createMovementBatch` (~dòng 1503-1531): phiếu gộp lấy unitCost/reason/partner/note từ dòng
+  đầu tiên của SP, số lượng = tổng → 2 × 100.000đ = 200.000đ.
+- `createOrder` (~dòng 1122): `unitCost: args.items.find((i) => i.productId === m.prod.id)?.unitPrice ?? 0`.
+- `updateOrderStatus` — 3 nhánh trong hàm (~dòng 1257 giữ hàng pending → reserved, ~dòng 1345
+  xác nhận pending → confirmed, ~dòng 1418 huỷ đơn/bỏ giữ hoàn kho): cùng mẫu trên, `items` ở
+  đây là `orderItems` của đơn (đọc từ `schema.orderItems`), `unitPrice` là giá bán của từng
+  dòng trên đơn. Nhánh reserved → confirmed chỉ trừ `reservedQty`, không sinh phiếu nên không
+  có lỗi tiền; nhánh confirmed → reserved chỉ cộng `reservedQty`, không sinh phiếu.
+- `releaseReservation` (~dòng 1747, ngoài `updateOrderStatus` nhưng cùng mẫu): phiếu hoàn giữ
+  hàng lấy giá dòng đầu.
+- `createReturn` (~dòng 1589-1625): phiếu nhập trả hàng gộp lấy `unitPrice: g.first.item.unitPrice`.
+  Đã kiểm chứng: `refundTotal` và công nợ ở đây tính đúng theo từng dòng (`reduce` theo
+  `lineItems`, `qty × item.unitPrice`) nên GIỮ NGUYÊN, chỉ sửa phiếu.
+- Cùng mẫu ở nhánh huỷ đơn: khoản chờ hoàn kho (`pendingRestocks`) cho sản phẩm ngưng bán cũng
+  ghi 1 lần theo tổng netQty với `unitPrice` của dòng đầu — sửa luôn: tách theo giá (xem dưới),
+  vì khi xử lý khoản chờ (`resolvePendingRestock`) phiếu hoàn sẽ mang đơn giá đó.
+
+### Cách sửa — tách phiếu theo GIÁ, giữ nguyên 1 lần applyStock cho mỗi sản phẩm
+
+- Helper mới `chainStock(start, splits, dir)` (gần `insertMovements`): nhận tồn trước thao tác
+  và danh sách các phần tách theo giá, trả về before/after NỐI CHUỖI theo đúng thứ tự dòng —
+  phiếu đầu before = tồn trước thao tác, phiếu sau before = after của phiếu trước, phiếu cuối
+  after = tồn sau lần apply duy nhất (vd tồn 10, nhập 1 × 100k + 1 × 200k → phiếu 1: 10 → 11,
+  phiếu 2: 11 → 12; tổng tiền phiếu = 300.000đ đúng).
+- `createMovementBatch`: gộp theo bộ đầy đủ (productId, đơn giá hiệu dụng, reason, partner, note)
+  — đơn giá hiệu dụng tính TRƯỚC khi gộp (unitCost > 0 thì dùng, không thì fallback
+  costPrice/sellPrice như code hiện tại) — nên dòng nào khác lý do/đối tác/ghi chú cũng không bị
+  nuốt mất. Tồn vẫn áp 1 lần/SP; `results` vẫn 1 mục cho mỗi sản phẩm, `newStock` = tồn sau cùng.
+- `createOrder` / `updateOrderStatus` (giữ hàng, xác nhận, huỷ đơn) / `releaseReservation` /
+  `createReturn`: reason/partner đồng nhất theo đơn nên gộp theo (productId, unitPrice) là đủ.
+  Nhánh huỷ đơn: phần chưa trả (netQty) tách theo giá — dòng đã trả hết (netQty 0) không sinh
+  phiếu; `afterReserved` khi là đơn giữ hàng vẫn dùng TỔNG số lượng giữ của sản phẩm (không đổi);
+  khoản chờ hoàn kho tách theo giá, kiểm tra trùng nay gồm cả `unitPrice`.
+- KHÔNG lấy đơn giá bình quân gia quyền rồi làm tròn: cột `movements.unit_cost` là INTEGER
+  (schema.ts ~dòng 32) nên làm tròn sẽ lệch tiền phiếu. KHÔNG sửa `compensateStock` (guard
+  version giữ nguyên) và không đụng logic trừ/hoàn tồn đợt 3.
+- Không sửa client: lịch sử/in/CSV hiển thị theo từng phiếu (mỗi phiếu 1 dòng, tiền =
+  quantity × unitCost — `App.tsx` dòng ~1661 CSV, ~1681 in phiếu), tách phiếu chỉ làm phiếu
+  xuất hiện thành 2 dòng đúng tiền. Đã grep kiểm tra: client không có chỗ nào gộp phiếu theo
+  refCode + SP để tính tiền.
+
+### Các nơi tiêu thụ movements — đã xác minh lại (không cần sửa)
+
+- `reconcileStock` (~dòng 1780): tính tồn kỳ vọng từ SỐ LƯỢNG theo type (in +, out −, adjust =
+  afterStock) → tách phiếu theo giá không đổi tổng số lượng nên không ảnh hưởng. Chứng minh
+  bằng harness 3a: đối chiếu sau phiếu nhập tách giá cho diffs rỗng.
+- `deleteMovement` (~dòng 821-876): chỉ cho xoá phiếu GẦN NHẤT của SP và hoàn tồn theo delta
+  (afterStock − beforeStock) so với tồn hiện tại; phiếu "Xuất theo đơn hàng" và "Hoàn kho do
+  huỷ đơn" gắn đơn thì không cho xoá riêng. Với chuỗi phiếu nối nhau (10 → 11, 11 → 12), xoá
+  phiếu cuối rồi xoá phiếu trước vẫn đúng. Chứng minh bằng harness 3b: xoá phiếu cuối → tồn
+  11, xoá phiếu trước → tồn 10, 0 phiếu còn lại. (Lưu ý: `deleteMovement` không kiểm tra
+  reason "Giữ hàng theo đơn" / "Hủy giữ hàng" — phiếu giữ/huỷ giữ vẫn xoá riêng được như
+  trước đợt này; hành vi đó không đổi, xem "Giới hạn còn lại".)
+- `getReports`: tiền doanh thu/lợi nhuận tính từ `orderItems` (từng dòng, `soldQty × unitPrice`,
+  trừ phần trả), KHÔNG dùng `movements.unitCost` → tách phiếu không ảnh hưởng.
+- `getDashboard`: `todayInValue`/`todayOutValue` = Σ quantity × unitCost theo phiếu → tách phiếu
+  làm các số này ĐÚNG (trước sửa thiếu 100.000đ trong kịch bản báo). Chứng minh bằng harness
+  1b/1b-in: todayOutValue/todayInValue tăng đúng 300.000đ.
+- `closeStocktake` và `reconcileStock` (phiếu adjust): `unitCost = costPrice` — 1 giá duy nhất
+  cho mỗi sản phẩm nên không có lỗi lấy giá dòng đầu; không sửa. `createMovement` (phiếu 1
+  dòng), `createProduct`/`importProductsCsv` (tồn đầu kỳ), `resolvePendingRestock` (1 khoản
+  chờ) đều chỉ có 1 dòng/1 giá nên không bị lỗi này.
+
+### Giới hạn còn lại
+
+- Dữ liệu CŨ đã ghi sai tiền trước đợt này không tự sửa: các phiếu gộp cũ vẫn mang đơn giá
+  dòng đầu (vd 2 × 100.000đ) — dashboard/báo cáo theo phiếu của ngày cũ vẫn thiếu tiền đó.
+  Muốn sửa số liệu cũ phải đối chiếu thủ công từng mã phiếu (so tiền phiếu với đơn gốc) rồi
+  sửa trực tiếp DB; không có migration/tool tự sửa vì không phân biệt được phiếu nào gộp
+  sai giá với phiếu nào vốn chỉ có 1 giá.
+- Hai lần chốt kiểm kê đồng thời vẫn có thể điều chỉnh trùng, và người chen ngang đổi tồn
+  giữa lúc áp và lúc bù vẫn làm bù thất bại theo thiết kế (cần đối chiếu thủ công) — như đã
+  ghi từ đợt 2/3, đợt này không thay đổi.
+- `deleteMovement` vẫn cho xoá riêng phiếu "Giữ hàng theo đơn" / "Hủy giữ hàng" (chỉ chặn
+  "Xuất theo đơn hàng" / "Hoàn kho do huỷ đơn"): xoá phiếu giữ hàng làm tồn hoàn theo delta
+  nhưng cờ `stockDeducted`/số lượng giữ của đơn không đổi theo — giống hành vi trước đợt này,
+  chưa có test riêng; nên tránh xoá tay các phiếu gắn đơn, hãy huỷ đơn/huỷ giữ qua đúng chức
+  năng.
+- Tách phiếu làm Lịch sử/In/CSV có thêm dòng cho cùng một mã phiếu (2 dòng thay vì 1) khi
+  cùng SP khác giá — đúng tiền nhưng người dùng cũ có thể thắc mắc vì sao 1 mã PN/PX hiện
+  2 dòng; đã ghi chú trong `README.md` và `TESTING.md` mục 7d.
 
 ## Sửa 2 lỗi — đợt 3 (ngày 2026-11-10) — xem `TEST_RESULTS.md` mục H
 

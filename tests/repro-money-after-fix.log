@@ -1,0 +1,23 @@
+=== HARNESS TÁI HIỆN LỖI TIỀN PHIẾU (GỘP THEO SP) — quản lý kho thiết bị vệ sinh ===
+Ngày chạy: 2026-11-10T03:04:51.371Z
+  [PASS] 1a phiếu nhập batch 1×100k + 1×200k: tổng tiền phiếu == 300.000đ, tồn 10→12, 0 bản ghi sửa chữa, results 1 SP (tồn mới 12) — batch ok=true refCode=PN20261110-1842, tiền phiếu=300000 (trước sửa: 200.000đ — phiếu gộp 2×100.000đ), stock=12, phiếu=2 [10→11, 11→12], repairs mới=0, results=[{"productId":1,"newStock":12,"version":1}]
+  [PASS] 1b phiếu xuất batch 1×100k + 1×200k: tổng tiền phiếu == 300.000đ, tồn 10→8, todayOutValue tăng đúng 300.000đ — batch ok=true, tiền phiếu=300000 (trước sửa: 200.000đ), stock=8, todayOutValue 0→300000 (tăng 300000)
+  [PASS] 1b-in phiếu nhập batch 1×100k + 1×200k: todayInValue tăng đúng 300.000đ — batch ok=true, tiền phiếu=300000, todayInValue 301500→601500 (tăng 300000)
+  [PASS] 1c batch 2×100k + 1×100k cùng giá/cùng reason: vẫn đúng 1 phiếu gộp (số lượng 3, tiền 300.000đ, before 10 → after 13) — batch ok=true, phiếu=1 [{"qty":3,"cost":100000,"before":10,"after":13}], stock=13
+  [PASS] 1d batch cùng giá nhưng khác reason: 2 phiếu, cả 2 reason đều còn (Nhập kho A + Nhập kho B), tổng tiền 300.000đ, tồn 13 — batch ok=true, phiếu=2 reasons=["Nhập kho A","Nhập kho B"], tiền=300000, stock=13
+  [PASS] 2a tạo đơn confirmed 2 dòng cùng SP: tổng tiền đơn == 300.000đ, tổng tiền phiếu xuất == 300.000đ, tồn 10→8 — totalAmount=300000, tiền phiếu xuất=300000 (trước sửa: 200.000đ), stock=8, phiếu xuất=2 [{"qty":1,"cost":100000,"before":10,"after":9},{"qty":1,"cost":200000,"before":9,"after":8}]
+  [PASS] 2b xác nhận đơn pending 2 dòng cùng SP: tổng tiền phiếu xuất == 300.000đ, tồn 10→8, đơn confirmed — conf ok=true, tiền phiếu xuất=300000 (trước sửa: 200.000đ), stock=8, status=confirmed, phiếu xuất=2
+  [PASS] 2c-1 trả hết 2 dòng cùng SP giá khác nhau: tổng tiền phiếu nhập trả == 300.000đ, tồn về 10, refund 300.000đ → công nợ còn 0 — ret ok=true, tiền phiếu nhập trả=300000 (trước sửa: 200.000đ), stock=10, công nợ còn=0, phiếu nhập=2
+  [PASS] 2c-2 trả một phần dòng 100.000đ: tiền phiếu nhập trả == 100.000đ, tồn 9, công nợ còn 200.000đ (không hồi quy đợt 2/3) — ret ok=true, tiền phiếu nhập trả=100000, stock=9, công nợ còn=200000
+  [PASS] 2d batch 2 dòng cùng SP + lỗi ghi: thao tác thất bại, tồn về đúng 10, 0 phiếu, 0 bản ghi sửa chữa — batch={"ok":false,"error":"Ghi dữ liệu thất bại (Mô phỏng mất mạng khi ghi dữ liệu.), tồn đã hoàn về số trước đó. Vui lòng thử lại.","refCode":"","results":[]}, stock=10, out=0, repairs mới=0
+  [PASS] 3a đối chiếu tồn sau phiếu nhập tách giá: không lệch (diffs rỗng), tồn 12 — batch ok=true, diffs=[], stock=12
+  [PASS] 3b xoá phiếu tách giá theo chuỗi: xoá phiếu cuối 11→12 → tồn 11, xoá phiếu trước 10→11 → tồn 10, 0 phiếu còn lại — del cuối ok=true stock=11, del trước ok=true stock=10, phiếu còn lại=0
+  [PASS] 3c huỷ đơn confirmed 2 dòng cùng SP giá khác nhau: tổng tiền phiếu hoàn == 300.000đ, tồn về 10, đơn cancelled — cancel ok=true, stock lúc xác nhận=8, tiền phiếu hoàn=300000, stock=10, status=cancelled, phiếu hoàn=2 [{"qty":1,"cost":100000,"before":8,"after":9},{"qty":1,"cost":200000,"before":9,"after":10}]
+  [PASS] 3d huỷ giữ đơn reserved 2 dòng cùng SP giá khác nhau: tổng tiền phiếu hoàn == 300.000đ, tồn về 10, reservedQty 0, đơn cancelled — rel ok=true, stock lúc giữ=8, tiền phiếu hoàn=300000, stock=10, reservedQty=0, status=cancelled, phiếu hoàn=2
+
+=== TỔNG KẾT ===
+1 — Phiếu batch 2 dòng cùng SP, giá khác nhau (100.000đ + 200.000đ): 5/5 PASS
+2 — Đơn hàng 2 dòng cùng SP, giá khác nhau (100.000đ + 200.000đ): 4/4 PASS
+3 — Hồi quy đợt 3 + nơi tiêu thụ movements (đối chiếu, xoá phiếu): 5/5 PASS
+TỔNG: 14 PASS, 0 FAIL
+KẾT LUẬN: TẤT CẢ ĐỀU PASS.
