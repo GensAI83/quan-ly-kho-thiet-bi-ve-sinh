@@ -1,4 +1,120 @@
-# CHANGES.md — Nhật ký thay đổi (bản nâng cấp 2026-11-09)
+# CHANGES.md — Nhật ký thay đổi (bản nâng cấp 2026-11-09, đợt 2 ngày 2026-11-10)
+
+## Sửa 4 nhóm lỗi — đợt 2 (ngày 2026-11-10) — xem `TEST_RESULTS.md` mục E–G
+
+Harness tái hiện mới: `tests/repro-4-bugs.ts` (`bun tests/repro-4-bugs.ts`, Bun + SQLite
+trong bộ nhớ, không sửa `tests/repro-5-bugs.ts`). Trước sửa: **4 PASS / 14 FAIL** (log ở
+`tests/repro-4-before-fix.log`); sau sửa: **18 PASS / 0 FAIL** (log ở
+`tests/repro-4-after-fix.log`). Harness cũ chạy lại: **42/42 PASS** (không hồi quy).
+Kiểm chứng phụ thêm 6 mục (`tests/verify-extra-4.ts`, log `tests/verify-extra-4.log`):
+migration 0001→0005, khôi phục backup có công nợ trùng, hủy-mở lại sau khi trả một phần,
+hủy giữ hàng, hủy đơn 2 lần, đổi PIN.
+
+Lưu ý trung thực: 4 mục trong harness mới đã PASS cả trước khi sửa (1b xung đột version
+kiểm kê, 2b thu nợ sau khi trả một phần, 4b xuất cùng lúc, 4c xác nhận cùng lúc trong một
+tiến trình) — chúng được giữ làm guard hồi quy; bản sửa bổ sung phòng thủ cho các cửa sổ
+lỗi mà harness đơn tiến trình không ép được (xem "Giới hạn còn lại" bên dưới).
+
+### Nền tảng chung — saga bù trừ (áp dụng cho TẤT CẢ chỗ dùng `applyStock`)
+
+Đã kiểm tra mã nguồn SDK: `db.batch()` của `@libsql/client` (client local, file
+`lib-esm/sqlite3.js`) chỉ chạy lần lượt từng câu lệnh, câu sau lỗi thì câu trước vẫn
+giữ; `drizzle-orm/libsql` chỉ gọi `client.batch()` mà không bọc `BEGIN`/`COMMIT` — tức
+**`db.batch()` KHÔNG phải transaction**. Vì vậy đây là saga có bù trừ, KHÔNG phải
+transaction nguyên tử thật (xem "Giới hạn còn lại").
+
+- `compensateStock` giờ trả về danh sách các lần áp bù thất bại (kiểm tra từng update
+  có khớp hàng không) thay vì im lặng; `rollbackApplied` bù trừ + ghi bản ghi sửa chữa
+  nếu bù không được; `recordCompensationFailure` ghi khoản chờ hoàn kho (số lượng = số
+  cần cộng vào tồn để về đúng) + audit; `sagaFailed` dọn dẹp (xóa phiếu vừa ghi, hoàn
+  tồn) rồi trả lỗi rõ ràng, nêu rõ cần đối chiếu tồn kho khi bù không được.
+- `insertMovements` ghi phiếu lần lượt và trả về id từng phiếu để khi bước sau lỗi thì
+  xóa đúng các phiếu đó (không đụng phiếu cũ cùng `refCode`); audit trong các bước saga
+  chuyển thành best-effort (ghi lỗi cũng không làm hỏng phiếu đã ghi xong).
+- Áp dụng cho: `createMovement`, `deleteMovement`, `createOrder` (lỗi ghi thì xóa cả
+  đơn/dòng/phiếu vừa tạo), `updateOrderStatus` (mọi nhánh), `createMovementBatch`,
+  `createReturn` (ghi tuần tự + hoàn lại cả `returnedQty`/trạng thái đơn/công nợ khi
+  lỗi), `releaseReservation`, `reconcileStock`, `resolvePendingRestock`, `closeStocktake`.
+  `recordDebtPayment` cũng được bọc: ghi phiếu thu lỗi thì hoàn lại công nợ.
+- Thất bại không lưu `requestKey` (chỉ lưu khi thành công) nên bấm lại sau thất bại là an
+  toàn; tồn đã hoàn về đúng số trước đó.
+
+### Lỗi 1 — Kiểm kê nhiều mặt hàng lỗi giữa chừng (gốc: `closeStocktake` return lỗi giữa vòng lặp mà không bù các dòng đã áp; `batchAll` không có try/catch; `compensateStock` không kiểm tra)
+- Validate TOÀN BỘ dòng trước khi áp bất kỳ dòng nào (sản phẩm tồn tại/còn kinh doanh,
+  tồn sau điều chỉnh không âm); vòng lặp áp lại kiểm tra tồn âm với số mới nhất.
+- Bọc toàn bộ áp tồn + ghi phiếu + đóng phiếu trong try/catch saga (xem nền tảng chung).
+- Chốt lại lũy đẳng: trước khi áp một dòng, kiểm tra đã có phiếu `adjust` với `refCode`
+  == mã phiếu kiểm kê cho sản phẩm đó chưa — có thì bỏ qua dòng đó (`appliedDiff: 0`),
+  nếu tất cả đã áp thì chỉ đóng phiếu.
+
+### Lỗi 2 — Trả hàng làm sai số tiền đã thu (gốc: `syncOrderPaymentFromDebt` cộng tiền hoàn hàng vào cọc và đặt `paid` chỉ vì công nợ còn 0; `recordDeposit` so với tổng gốc)
+- Tách khái niệm: tiền đã thu (`depositAmount`) CHỈ tăng khi thực sự thu tiền
+  (`recordDeposit`/`recordDebtPayment`), KHÔNG bao giờ cộng tiền hoàn hàng.
+- `netPayable = tổng đơn − tiền đã hoàn hàng` (tính từ `orderItems` vừa đọc lại);
+  `paymentStatus` tính thống nhất mọi nơi theo `netPayable`: cọc > 0 và cọc >=
+  `netPayable` → `paid`; cọc > 0 → `partial`; ngược lại `unpaid`. (Đơn trả hết hàng mà
+  chưa thu đồng nào thì `unpaid`, không phải `paid`.)
+- `refreshOrderPaymentStatus` (chỉ tính lại trạng thái) dùng chung cho `createReturn`;
+  `addCollectedAndRefresh` (cộng tiền thu thực rồi tính lại) dùng cho `recordDebtPayment`;
+  `recordDeposit` chặn cọc vượt `netPayable` (trước đây so với tổng gốc).
+- Bất biến giữ sau mọi thao tác: `công nợ còn lại == max(0, netPayable − cọc)` và
+  `cọc == tiền thực thu` (harness kiểm tra cả hai sau mỗi thao tác).
+- Đã xóa helper cũ `syncOrderPaymentFromDebt`.
+
+### Lỗi 3 — Mở lại đơn đã hủy làm nhân công nợ (gốc: `createReceivableDebtIfNeeded` chỉ kiểm tra `.limit(1)` không `ORDER BY`, không lọc `kind`, và khoản `cancelled` không chặn insert mới)
+- Xét TẤT CẢ công nợ phải thu của đơn (mới nhất trước): đã có khoản đang hoạt động
+  (`open`/`overdue`) thì không làm gì; chỉ có khoản `cancelled` thì KÍCH HOẠT LẠI khoản
+  mới nhất đó (`status` open, `totalAmount` = số còn phải trả theo `netPayable − cọc`,
+  `paidAmount` = 0, ghi chú rõ "mở lại đơn"), KHÔNG insert mới; chưa có khoản nào thì
+  insert mới. Hai thao tác đua nhau tạo cùng lúc: bên thua bắt lỗi unique rồi kiểm tra lại.
+- Migration 0005: unique index có điều kiện `debts_one_active_per_ref` trên
+  `(ref_code, kind)` khi `status IN ('open', 'overdue')` — tối đa 1 công nợ đang hoạt
+  động cho mỗi đơn. Migration dọn trùng trước (chỉ giữ khoản mới nhất, khoản cũ thành
+  `cancelled`, khoản `paid` giữ nguyên để xử lý hoàn tiền thủ công như trước).
+  `restoreBackup` cũng dedup công nợ trùng trong bản sao lưu cũ (khoản thừa khôi phục
+  dạng `cancelled`) để không phá luồng khôi phục.
+
+### Lỗi 4 — Ghi dữ liệu thất bại vẫn làm mất tồn (gốc: mẫu "áp tồn trước, ghi chứng từ sau bằng `batchAll`" không có try/catch ở mọi action; `compensateStock` không được xác minh)
+- Áp dụng mẫu saga nền tảng chung cho tất cả chỗ dùng `applyStock` (xem trên).
+- Chống xác nhận/giữ hàng trùng: `updateOrderStatus` claim nguyên tử khi chuyển từ
+  chưa trừ kho sang đã trừ (`UPDATE orders SET status=..., stockDeducted=1 WHERE id=...
+  AND stockDeducted=0`); bên thua đọc lại — nếu đơn đã đúng trạng thái đích thì coi
+  như xong (lũy đẳng), còn không thì báo xung đột để tải lại. Khi claim thành công mà
+  bước sau lỗi thì đơn được hoàn về trạng thái/cờ cũ trong catch.
+- Nhánh hủy đơn: chỉ hoàn kho khi thực sự có phiếu xuất cho đơn (chống cộng thừa trong
+  cửa sổ giữa claim và áp tồn); ghi phiếu chờ hoàn kho tránh trùng khi thử lại.
+
+### File thay đổi (đợt 2)
+- `server/src/actions.ts` — helpers saga + tiền/công nợ + sửa mọi action nêu trên.
+- `drizzle/0005_debt_unique_active.sql` (mới) + `drizzle/meta/_journal.json` (thêm entry idx 4).
+- `tests/repro-4-bugs.ts` (mới) + `tests/repro-4-before-fix.log` / `tests/repro-4-after-fix.log`
+  (mới) + `tests/verify-extra-4.ts` (mới) + `tests/verify-extra-4.log` (mới).
+- `CHANGES.md`, `TESTING.md` (thêm mục 7: kiểm thử trình duyệt mất mạng + 2 người cùng
+  lúc), `TEST_RESULTS.md` (thêm mục E–G), `README.md` (thêm harness đợt 2).
+- Không đổi `client/src/App.tsx`: giao diện đã truyền `actorToken` đầy đủ; các sửa đợt
+  này đều ở server + migration.
+
+### Giới hạn còn lại (đợt 2)
+- **Không có transaction thật.** Saga bù trừ che được lỗi ghi sau khi áp tồn, nhưng vẫn
+  còn cửa sổ lỗi: (a) sập tiến trình/mất điện đúng giữa áp tồn và bù trừ — tồn lệch cho
+  đến khi chạy Đối chiếu tồn kho; (b) bù trừ thất bại thì tồn lệch và chỉ còn bản ghi
+  sửa chữa trong Chờ hoàn kho (harness 4d chứng minh đúng hành vi này); (c) ghi sửa
+  chữa lỗi thì cũng không còn dấu vết nào ngoài audit (nếu audit còn ghi được). Cần
+  chạy Đối chiếu tồn kho sau mọi sự cố mất mạng (xem `TESTING.md` mục 7c).
+- **Chốt kiểm kê đồng thời 2 tab/máy** vẫn có thể điều chỉnh trùng: kiểm tra phiếu
+  adjust trước khi áp chỉ an toàn khi chốt lại TUẦN TỰ (đã kiểm chứng 1d/1e); hai lần
+  chốt cùng lúc vẫn đua nhau được vì không có khóa hàng. Tương tự, hai lần tạo đơn cùng
+  `requestKey` cùng lúc vẫn có thể tạo trùng (kiểm tra idempotency trước khi ghi không
+  khóa được nhau) — cần chạy theo `TESTING.md` mục 7b và đối chiếu sau đó.
+- **Xác nhận vs hủy cùng đơn cùng lúc** (một máy xác nhận, một máy hủy trong vài ms):
+  claim chống được xác nhận trùng, guard chứng từ xuất chống được hoàn kho thừa, nhưng
+  thứ tự cuối cùng vẫn tùy bên nào thắng — kiểm tra thủ công theo `TESTING.md` mục 7b.
+- **Kích hoạt lại công nợ đã void** ghi đè `paidAmount` về 0: lịch sử "đã thu bao nhiêu
+  trước khi hủy" chỉ còn trong `depositAmount` của đơn và bảng `debt_payments`, không
+  còn trong chính hàng công nợ đó.
+- Chưa kiểm thử trên trình duyệt thật: ngắt mạng giữa lúc bấm Lưu/Xác nhận/Chốt và
+  2 máy/2 tab cùng lúc — xem `TESTING.md` mục 7 và `TEST_RESULTS.md` mục G (ghi
+  "Chưa chạy được", không ghi Đạt).
 
 ## Sửa 5 lỗi (ngày 2026-11-09) — xem `TEST_RESULTS.md` để biết kết quả kiểm thử
 

@@ -1,10 +1,15 @@
-# TEST_RESULTS.md — Kết quả kiểm thử ngày 2026-11-09
+# TEST_RESULTS.md — Kết quả kiểm thử ngày 2026-11-09 và 2026-11-10
 
 Chạy sau đợt sửa 5 lỗi (xem `CHANGES.md` mục "Sửa 5 lỗi"). Cách chạy: harness
 `bun tests/repro-5-bugs.ts` (Bun + SQLite trong bộ nhớ, gọi trực tiếp `Actions` handler)
 và kiểm chứng phụ (migration, đổi PIN, hủy đơn với sản phẩm ngưng bán, nhập CSV, ma trận
 phân quyền đầy đủ). Log đầy đủ: `tests/repro-before-fix.log`, `tests/repro-after-fix.log`,
 `tests/verify-extra.log`.
+
+Đợt 2 (ngày 2026-11-10): sửa 4 nhóm lỗi mới (xem `CHANGES.md` mục "Sửa 4 nhóm lỗi —
+đợt 2"). Harness mới `bun tests/repro-4-bugs.ts`, log `tests/repro-4-before-fix.log` /
+`tests/repro-4-after-fix.log`, kiểm chứng phụ `tests/verify-extra-4.ts` /
+`tests/verify-extra-4.log`. Kết quả đợt 2 ở mục E–G bên dưới.
 
 Quy ước cột Kết quả:
 - **Đạt** — đã chạy và đúng.
@@ -143,3 +148,77 @@ Số liệu kiểm chứng trong harness (đúng kịch bản đã báo):
 - **Chưa chạy được:** mọi mục cần đếm hàng thật tại cửa hàng, trình duyệt thật, tắt mạng thật,
   2 máy/tài khoản cùng lúc, in phiếu, mở CSV bằng Excel — phải chạy theo `TESTING.md`
   trước khi dùng cho bán hàng thật.
+
+## E. Đợt 2 — Harness tái hiện 4 nhóm lỗi (`bun tests/repro-4-bugs.ts`)
+
+| Nhóm | Trước sửa | Sau sửa |
+|---|---|---|
+| 1 — Kiểm kê nhiều mặt hàng lỗi giữa chừng | 1/6 PASS | **6/6 PASS** |
+| 2 — Trả hàng làm sai số tiền đã thu | 1/4 PASS | **4/4 PASS** |
+| 3 — Mở lại đơn đã hủy làm nhân công nợ | 0/3 PASS | **3/3 PASS** |
+| 4 — Ghi dữ liệu thất bại vẫn làm mất tồn | 2/5 PASS | **5/5 PASS** |
+| **Tổng** | **4 PASS / 14 FAIL** | **18 PASS / 0 FAIL** |
+
+Số liệu kiểm chứng trong harness (đúng kịch bản đã báo):
+- Lỗi 1: dòng 3 ngưng bán → chốt lỗi, tồn cả 3 mặt hàng không đổi (10/5/8), 0 phiếu adjust
+  (trước sửa: tồn 12/3/8 — 2 dòng đầu đã áp mà không được hoàn); lỗi ghi movements → chốt
+  lỗi, tồn hoàn về 10/5 (trước sửa: handler ném lỗi, tồn 12/3); chốt lại sau thất bại →
+  tồn đúng 12/3, mỗi SP đúng 1 phiếu adjust (trước sửa: 14/1 — điều chỉnh trùng); dòng đã
+  có phiếu adjust từ lần chốt dở → chốt lại bỏ qua dòng đó (trước sửa: tồn 14).
+- Lỗi 2: đơn 100đ chưa cọc, trả hết hàng → cọc vẫn **0**, trạng thái `unpaid` (trước sửa:
+  cọc 100, `paid`); trả 40đ rồi thu 60đ qua công nợ → đơn `paid`, cọc 60, công nợ còn 0
+  (đã đúng từ trước — giữ làm guard); trả 40đ rồi cọc 60đ → đơn `paid`, cọc 60, công nợ
+  còn 0 (trước sửa: đơn `partial` trong khi công nợ đã `paid`/còn 0); cọc 70đ khi chỉ còn
+  phải trả 60đ → bị chặn (trước sửa: cho cọc 70đ). Bất biến
+  `công nợ còn lại == max(0, netPayable − cọc)` và `cọc == tiền thực thu` đúng sau mọi
+  thao tác trong các kịch bản trên.
+- Lỗi 3: xác nhận → hủy → xác nhận lại → đang giao → hoàn thành → chỉ **1 hàng công nợ**,
+  1 active, còn 100đ (trước sửa: 4 hàng — 1 cancelled + 3 open); đã cọc 40đ rồi hủy-mở
+  lại → kích hoạt lại khoản cũ còn 60đ, cọc vẫn 40đ (trước sửa: 2 hàng); chèn trực tiếp
+  công nợ active trùng → lỗi unique index (trước sửa: chèn được).
+- Lỗi 4: lỗi ghi phiếu xuất / đơn xác nhận sau khi áp tồn → trả lỗi rõ ràng (không ném),
+  tồn vẫn 10, 0 phiếu/0 đơn (trước sửa: handler ném lỗi, tồn 8, đơn mồ côi, tồn 6 sau 2
+  lần); 2 lần xuất cùng lúc (cùng version) → chỉ 1 thành công, tồn 7 (đã đúng từ trước —
+  guard); 2 lần xác nhận đơn cùng lúc → chỉ trừ tồn 1 lần, tồn 8, đúng 1 phiếu xuất
+  (trước sửa trong tiến trình cũng chỉ trừ 1 lần nhờ version-check — guard; claim chống
+  trùng là phòng thủ cho 2 tab/máy thật, xem mục G); bù trừ bị ép thất bại → trả lỗi nêu
+  rõ "đối chiếu tồn kho" + có bản ghi sửa chữa trong Chờ hoàn kho (trước sửa: ném lỗi,
+  không có bản ghi nào).
+
+Lưu ý trung thực: các mục 1b, 2b, 4b, 4c đã PASS cả trước khi sửa (logic cũ đã đúng ở
+những điểm đó trong tiến trình đơn); chúng được giữ làm guard hồi quy, và bản sửa bổ
+sung phòng thủ cho các cửa sổ lỗi mà harness đơn tiến trình không ép được (xem
+`CHANGES.md` mục "Giới hạn còn lại").
+
+## F. Kiểm chứng phụ đợt 2 (6 mục, đều PASS — xem `tests/verify-extra-4.log`)
+
+- Migration 0001→0005 trên SQLite trống: 18 bảng + index `debts_one_active_per_ref`;
+  dọn trùng: 2 công nợ active trùng → chỉ giữ khoản mới nhất, khoản cũ thành `cancelled`,
+  khoản `paid` giữ nguyên.
+- Khôi phục backup chứa công nợ active trùng: thành công, chỉ 1 active, khoản trùng
+  thành `cancelled` (không phá luồng khôi phục).
+- Trả 40đ rồi hủy-mở lại: công nợ kích hoạt lại còn 60đ (= 100 − 40 hoàn − 0 cọc).
+- Hủy giữ hàng: tồn 7 → 10, số lượng giữ 3 → 0, đơn `cancelled`, công nợ `cancelled`.
+- Hủy đơn 2 lần: tồn 10 sau lần 1, vẫn 10 sau lần 2.
+- Đổi PIN 123456 → 654321: PIN cũ lỗi, PIN mới đăng nhập được.
+
+Harness cũ `bun tests/repro-5-bugs.ts` chạy lại sau đợt 2: **42/42 PASS** (không hồi quy).
+`bun run typecheck` 0 lỗi; `bun run build:server` thành công (`server/dist/actions.js`
+0,34 MB); `bun run build` vẫn dừng ở `build:client` do SDK chặn build tay như trước.
+
+## G. Kiểm thử trình duyệt đợt 2 — mất mạng + 2 người cùng lúc
+
+Harness mô phỏng mất mạng/đồng thời ở tầng handler là bằng chứng mức code, KHÔNG thay thế
+kiểm thử trên trình duyệt thật. Các mục dưới đây ghi **Chưa chạy được** — chạy theo
+`TESTING.md` mục "Kiểm thử trình duyệt: mất mạng + 2 người cùng lúc" trước khi dùng cho
+bán hàng thật.
+
+| Mục | Kết quả | Ghi chú |
+|---|---|---|
+| Ngắt mạng giữa lúc bấm Lưu/Xác nhận/Chốt (phiếu nhập/xuất, tạo đơn, chốt kiểm kê) → báo rõ chưa ghi gì, tồn không đổi, không phiếu/đơn mồ côi | Chưa chạy được | Cần trình duyệt thật + ngắt mạng thật (DevTools offline hoặc rút dây). Mức code: harness 1c/4a tiêm lỗi ghi → tồn hoàn về, không phiếu/đơn mồ côi. |
+| Bật mạng lại rồi bấm lại đúng thao tác đó → chỉ ghi 1 lần (nhờ `requestKey` / chốt lại lũy đẳng) | Chưa chạy được | Cần trình duyệt thật. Mức code: harness 1d/1e (chốt lại không trùng), R3a/R3b (gửi trùng `requestKey`). |
+| 2 máy/2 tab đăng nhập 2 PIN khác nhau, cùng xuất 1 sản phẩm đến giới hạn tồn → chỉ 1 thành công, tồn cuối đúng, không âm | Chưa chạy được | Cần 2 máy/tab thật. Mức code: harness 4b (2 lần xuất cùng version → 1 thành công). |
+| 2 máy/2 tab cùng xác nhận 1 đơn chờ → chỉ trừ tồn 1 lần, chỉ 1 phiếu xuất | Chưa chạy được | Cần 2 máy/tab thật. Mức code: harness 4c (2 lần xác nhận cùng lúc → trừ 1 lần). |
+| 2 máy/2 tab cùng chốt 1 phiếu kiểm kê → chỉ 1 lần chốt có hiệu lực, không điều chỉnh trùng | Chưa chạy được | Cần 2 máy/tab thật. Mức code: chỉ có chốt lại TUẦN TỰ (1d/1e); chốt đồng thời 2 tab vẫn là cửa sổ lỗi còn lại (xem `CHANGES.md`). |
+| Mất mạng ngay khi bấm "Trả hàng"/"Thu nợ" → tiền cọc/công nợ không đổi, bấm lại sau khi có mạng thì đúng | Chưa chạy được | Cần trình duyệt thật. Mức code: harness nhóm 2 (cọc chỉ tăng khi thu tiền thật). |
+| Sau các thao tác trên: Đối chiếu tồn kho → không lệch; nếu lệch thì có bản ghi sửa chữa trong Chờ hoàn kho | Chưa chạy được | Cần làm tại cửa hàng sau khi chạy các mục trên. |

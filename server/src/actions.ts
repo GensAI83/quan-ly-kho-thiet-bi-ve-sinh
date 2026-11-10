@@ -140,6 +140,15 @@ async function saveIdem(db: Db, key: string | undefined, actionName: string, res
 // nhiều dòng dùng cơ chế saga: validate hết trước, cập nhật tồn từng dòng, nếu
 // 1 dòng lỗi version thì bù trừ hoàn lại các dòng đã trừ, chỉ ghi movements sau
 // khi mọi cập nhật tồn thành công.
+//
+// QUAN TRỌNG — db.batch() KHÔNG phải transaction: đã kiểm tra mã nguồn SDK
+// (@libsql/client lib-esm/sqlite3.js: batch() của client thường chỉ chạy lần lượt
+// từng câu lệnh, câu sau lỗi thì câu trước vẫn giữ; drizzle-orm/libsql chỉ gọi
+// client.batch() mà không bọc BEGIN/COMMIT). Vì vậy mọi chỗ "áp tồn trước, ghi
+// chứng từ sau" đều phải bọc try/catch kiểu saga: lỗi ghi nào sau khi đã áp tồn
+// cũng phải bù trừ hoàn lại (có KIỂM TRA từng lần bù có khớp hàng không), xóa
+// các phiếu vừa ghi, và nếu bù không được thì ghi bản ghi sửa chữa vào
+// pending_restocks + audit để đối chiếu bằng reconcileStock — không được im lặng.
 type StockApply = {
   productId: number; beforeStock: number; beforeReserved: number; beforeVersion: number;
   afterStock: number; afterReserved: number; afterVersion: number;
@@ -162,13 +171,85 @@ async function batchAll(db: Db, stmts: BatchItem<"sqlite">[]): Promise<void> {
   if (stmts.length === 0) return;
   await db.batch(stmts as [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]]);
 }
-async function compensateStock(db: Db, applied: StockApply[]): Promise<void> {
+// Bù trừ hoàn lại các lần áp tồn, KIỂM TRA từng update có khớp hàng không.
+// Trả về danh sách các lần áp BÙ THẤT BẠI (rỗng = bù đủ). Bù thất bại không được
+// im lặng: nơi gọi phải ghi bản ghi sửa chữa (xem rollbackApplied).
+async function compensateStock(db: Db, applied: StockApply[]): Promise<StockApply[]> {
+  const failed: StockApply[] = [];
   for (const a of [...applied].reverse()) {
-    await db
+    const rows = await db
       .update(schema.products)
       .set({ currentStock: a.beforeStock, reservedQty: a.beforeReserved, version: a.afterVersion + 1, updatedAt: new Date() })
-      .where(and(eq(schema.products.id, a.productId), eq(schema.products.version, a.afterVersion)));
+      .where(and(eq(schema.products.id, a.productId), eq(schema.products.version, a.afterVersion)))
+      .returning({ id: schema.products.id });
+    if (!rows[0]) failed.push(a);
   }
+  return failed;
+}
+
+// Ghi bản ghi sửa chữa khi bù trừ thất bại: một khoản chờ hoàn kho (số lượng =
+// số cần cộng vào tồn hiện tại để về đúng số trước thao tác) + audit, để nhân
+// viên đối chiếu bằng Đối chiếu tồn kho thay vì để lệch im lặng.
+async function recordCompensationFailure(db: Db, actorName: string, failed: StockApply[], context: string): Promise<void> {
+  for (const a of failed) {
+    const prod = await getProduct(db, a.productId);
+    const fixQty = a.beforeStock - a.afterStock;
+    await db.insert(schema.pendingRestocks).values({
+      orderCode: "", productId: a.productId, productSku: prod?.sku ?? "", productName: prod?.name ?? "",
+      quantity: fixQty, unitPrice: 0,
+      reason: `Bù trừ tồn thất bại (${context}): tồn hiện lệch ${fixQty > 0 ? `thiếu ${fixQty}` : `thừa ${-fixQty}`} so với trước thao tác — cần đối chiếu bằng Đối chiếu tồn kho.`,
+    });
+    await writeAudit(db, actorName, "compensation_failed", "product", a.productId, {
+      context, beforeStock: a.beforeStock, afterStock: a.afterStock, fixQty,
+    });
+  }
+}
+
+// Bù trừ + ghi sửa chữa nếu bù không được. Trả về số lần áp bù thất bại.
+async function rollbackApplied(db: Db, actorName: string, applied: StockApply[], context: string): Promise<number> {
+  if (applied.length === 0) return 0;
+  const failed = await compensateStock(db, applied);
+  if (failed.length > 0) {
+    try {
+      await recordCompensationFailure(db, actorName, failed, context);
+    } catch {
+      // Ghi sửa chữa lỗi cũng không được nuốt lỗi gốc: số lần bù thất bại vẫn trả về.
+    }
+  }
+  return failed.length;
+}
+
+// Thông báo lỗi khi bù trừ thất bại: nêu rõ cần đối chiếu tồn kho.
+function repairNeededMessage(failedCount: number): string {
+  return `Ghi dữ liệu thất bại và không hoàn lại được tồn cho ${failedCount} mặt hàng — đã ghi vào mục Chờ hoàn kho, hãy đối chiếu tồn kho (Đối chiếu tồn kho) trước khi thao tác tiếp.`;
+}
+
+// Ghi các phiếu (movements) lần lượt, đẩy id vào outIds — để khi bước sau lỗi thì
+// xóa đúng các phiếu này (không đụng phiếu cũ cùng refCode).
+async function insertMovements(db: Db, values: (typeof schema.movements.$inferInsert)[], outIds: number[]): Promise<void> {
+  for (const v of values) {
+    const r = await db.insert(schema.movements).values(v).returning({ id: schema.movements.id });
+    if (r[0]) outIds.push(r[0].id);
+  }
+}
+async function deleteMovementsByIds(db: Db, ids: number[]): Promise<void> {
+  for (const id of ids) await db.delete(schema.movements).where(eq(schema.movements.id, id));
+}
+
+// Dọn dẹp khi một bước saga ném lỗi (ghi DB lỗi, mất mạng): xóa các phiếu vừa ghi
+// (nếu có, qua cleanup), bù tồn đã áp (có kiểm tra + ghi sửa chữa nếu bù không
+// được), trả về thông báo lỗi rõ ràng cho người dùng.
+async function sagaFailed(db: Db, actorName: string, applied: StockApply[], context: string, err: unknown, cleanup?: () => Promise<void>): Promise<string> {
+  if (cleanup) {
+    try {
+      await cleanup();
+    } catch {
+      // Dọn dẹp lỗi cũng không nuốt lỗi gốc: vẫn bù tồn bên dưới.
+    }
+  }
+  const failedCount = await rollbackApplied(db, actorName, applied, context);
+  const detail = err instanceof Error ? err.message : String(err);
+  return failedCount > 0 ? repairNeededMessage(failedCount) : `Ghi dữ liệu thất bại (${detail}), tồn đã hoàn về số trước đó. Vui lòng thử lại.`;
 }
 function trackApplied(prod: ProdRow, applied: StockApply): void {
   prod.currentStock = applied.afterStock;
@@ -246,18 +327,49 @@ function toDebt(d: typeof schema.debts.$inferSelect) {
 }
 
 // Tạo công nợ phải thu cho đơn (chỉ khi còn dư > 0). Dùng cho đơn xác nhận/giao/hoàn thành.
-// Công nợ đã bị void do hủy đơn (status "cancelled") không chặn việc tạo công nợ mới
-// nếu đơn đó sau này được xác nhận lại.
-async function createReceivableDebtIfNeeded(db: Db, order: { orderCode: string; customerName: string; totalAmount: number; depositAmount: number }): Promise<void> {
-  const remaining = order.totalAmount - order.depositAmount;
+// Xét TẤT CẢ công nợ phải thu của đơn (mới nhất trước):
+// - đã có khoản đang hoạt động (open/overdue) thì không làm gì;
+// - chỉ có khoản đã void (cancelled) thì KÍCH HOẠT LẠI khoản mới nhất đó
+//   (status open, totalAmount = số còn phải trả, paidAmount = 0), KHÔNG insert mới;
+// - chưa có khoản nào (hoặc chỉ có khoản đã thu đủ mà vẫn còn dư — trường hợp
+//   không nên xảy ra) thì insert mới.
+// Số còn phải trả tính theo netPayable = tổng đơn − tiền đã hoàn hàng, trừ cọc.
+// Phòng thủ thêm ở tầng DB: unique index có điều kiện trong migration 0005 chỉ
+// cho phép tối đa 1 công nợ đang hoạt động cho mỗi (refCode, kind); nếu hai thao
+// tác đua nhau tạo cùng lúc, bên thua bắt lỗi unique rồi kiểm tra lại.
+async function createReceivableDebtIfNeeded(db: Db, order: { id: number; orderCode: string; customerName: string }): Promise<void> {
+  const orderRows = await db.select().from(schema.orders).where(eq(schema.orders.id, order.id)).limit(1);
+  const o = orderRows[0];
+  if (!o) return;
+  const refunded = await refundedTotalOfOrder(db, o.id);
+  const remaining = Math.max(0, o.totalAmount - refunded - o.depositAmount);
   if (remaining <= 0) return;
-  const existing = await db.select().from(schema.debts).where(eq(schema.debts.refCode, order.orderCode)).limit(1);
-  if (existing[0] && existing[0].status !== "cancelled") return;
-  await db.insert(schema.debts).values({
-    partnerName: order.customerName, partnerType: "customer", kind: "receivable",
-    totalAmount: remaining, paidAmount: 0, dueDate: "", refCode: order.orderCode,
-    note: `Công nợ đơn ${order.orderCode}`, status: "open",
-  });
+  const existing = await db.select().from(schema.debts)
+    .where(and(eq(schema.debts.refCode, o.orderCode), eq(schema.debts.kind, "receivable")))
+    .orderBy(desc(schema.debts.id));
+  if (existing.some((d) => d.status === "open" || d.status === "overdue")) return;
+  const cancelled = existing.find((d) => d.status === "cancelled");
+  if (cancelled) {
+    await db.update(schema.debts).set({
+      totalAmount: remaining, paidAmount: 0, status: "open",
+      note: `${cancelled.note} | Mở lại đơn ${o.orderCode} — công nợ kích hoạt lại`,
+    }).where(eq(schema.debts.id, cancelled.id));
+    return;
+  }
+  try {
+    await db.insert(schema.debts).values({
+      partnerName: o.customerName, partnerType: "customer", kind: "receivable",
+      totalAmount: remaining, paidAmount: 0, dueDate: "", refCode: o.orderCode,
+      note: `Công nợ đơn ${o.orderCode}`, status: "open",
+    });
+  } catch {
+    // Đua nhau tạo cùng lúc: nếu khoản đang hoạt động đã xuất hiện thì thôi,
+    // còn không thì đây là lỗi thật — ném lại để nơi gọi biết.
+    const again = await db.select().from(schema.debts)
+      .where(and(eq(schema.debts.refCode, o.orderCode), eq(schema.debts.kind, "receivable")));
+    if (again.some((d) => d.status === "open" || d.status === "overdue")) return;
+    throw new Error("Không tạo được công nợ phải thu cho đơn, vui lòng thử lại.");
+  }
 }
 
 // Hủy (void) công nợ phải thu gắn với đơn khi đơn bị hủy: còn lại về 0, trạng thái
@@ -278,17 +390,44 @@ async function voidReceivableDebtForOrder(db: Db, orderCode: string, actorName: 
   }
 }
 
-// Đồng bộ trạng thái thanh toán của đơn theo công nợ phải thu gắn với đơn.
-// Dùng sau mỗi lần thu nợ (recordDebtPayment) và sau khi trả hàng làm công nợ
-// về 0 (createReturn): cộng số tiền vừa thu vào cọc (không vượt tổng tiền đơn),
-// paymentStatus = paid khi công nợ còn 0, partial khi đã cọc > 0, unpaid khi chưa cọc.
-async function syncOrderPaymentFromDebt(db: Db, orderCode: string, amountJustCollected: number, debtRemainingAfter: number): Promise<void> {
+// ---------- Tiền đã thu / trạng thái thanh toán của đơn ----------
+// Tiền đã thu (depositAmount) CHỈ tăng khi thực sự thu tiền (recordDeposit /
+// recordDebtPayment), KHÔNG bao giờ cộng tiền hoàn hàng. Số tiền thực phải trả:
+// netPayable = tổng đơn − tiền đã hoàn hàng (từ orderItems vừa đọc lại).
+// Bất biến giữ sau mọi thao tác: công nợ còn lại == max(0, netPayable − cọc).
+async function refundedTotalOfOrder(db: Db, orderId: number): Promise<number> {
+  const items = await db.select().from(schema.orderItems).where(eq(schema.orderItems.orderId, orderId));
+  return items.reduce((s, i) => s + (i.returnedQty ?? 0) * i.unitPrice, 0);
+}
+function paymentStatusOf(netPayable: number, deposit: number): "unpaid" | "partial" | "paid" {
+  if (deposit > 0 && deposit >= netPayable) return "paid";
+  if (deposit > 0) return "partial";
+  return "unpaid";
+}
+
+// Tính lại paymentStatus của đơn theo netPayable và cọc hiện tại.
+// KHÔNG cộng tiền hoàn hàng vào cọc.
+async function refreshOrderPaymentStatus(db: Db, orderId: number): Promise<void> {
+  const orderRows = await db.select().from(schema.orders).where(eq(schema.orders.id, orderId)).limit(1);
+  const order = orderRows[0];
+  if (!order) return;
+  const refunded = await refundedTotalOfOrder(db, order.id);
+  const netPayable = order.totalAmount - refunded;
+  await db.update(schema.orders).set({
+    paymentStatus: paymentStatusOf(netPayable, order.depositAmount), updatedAt: new Date(),
+  }).where(eq(schema.orders.id, order.id));
+}
+
+// Cộng tiền vừa thu THỰC vào cọc của đơn rồi tính lại paymentStatus.
+// Dùng sau mỗi lần thu nợ (recordDebtPayment).
+async function addCollectedAndRefresh(db: Db, orderCode: string, amountJustCollected: number): Promise<void> {
   const orderRows = await db.select().from(schema.orders).where(eq(schema.orders.orderCode, orderCode)).limit(1);
   const order = orderRows[0];
   if (!order) return;
-  const newDeposit = Math.min(order.totalAmount, order.depositAmount + amountJustCollected);
-  const paymentStatus = debtRemainingAfter === 0 ? "paid" : newDeposit > 0 ? "partial" : "unpaid";
-  await db.update(schema.orders).set({ depositAmount: newDeposit, paymentStatus, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+  await db.update(schema.orders).set({
+    depositAmount: order.depositAmount + amountJustCollected, updatedAt: new Date(),
+  }).where(eq(schema.orders.id, order.id));
+  await refreshOrderPaymentStatus(db, order.id);
 }
 
 // ---------- Sao lưu / khôi phục ----------
@@ -658,14 +797,20 @@ export const Actions = {
       const unitCost = args.unitCost > 0 ? args.unitCost : (args.type === "in" ? prod.costPrice : prod.sellPrice);
       const applied = await applyStock(db, prod, after, prod.reservedQty);
       if (!applied) return { ok: false, error: VERSION_CONFLICT, newStock: before, refCode: "", version: prod.version };
-      await batchAll(db, [
-        db.insert(schema.movements).values({
+      // Saga: ghi phiếu lỗi sau khi đã áp tồn thì xóa phiếu vừa ghi + hoàn tồn.
+      const movIds: number[] = [];
+      try {
+        await insertMovements(db, [{
           productId: prod.id, productSku: prod.sku, productName: prod.name, type: args.type, quantity: qtyRecord,
           beforeStock: before, afterStock: after, unitCost, reason: args.reason, refCode, partner: args.partner.trim(), note: args.note.trim(),
           requestKey: key || null, actor: actorName,
-        }),
-        db.insert(schema.auditLogs).values({ actor: actorName, action: "create_movement", entity: "movement", entityId: 0, details: JSON.stringify({ productId: prod.id, sku: prod.sku, type: args.type, quantity: qtyRecord, beforeStock: before, afterStock: after, refCode }) }),
-      ]);
+        }], movIds);
+      } catch (e) {
+        const err = await sagaFailed(db, actorName, [applied], "createMovement", e, async () => { await deleteMovementsByIds(db, movIds); });
+        return { ok: false, error: err, newStock: before, refCode: "", version: prod.version };
+      }
+      // Audit là nhật ký (best-effort): ghi lỗi cũng không được làm hỏng phiếu đã ghi xong.
+      await writeAudit(db, actorName, "create_movement", "movement", movIds[0] ?? 0, { productId: prod.id, sku: prod.sku, type: args.type, quantity: qtyRecord, beforeStock: before, afterStock: after, refCode }).catch(() => {});
       ctx.invalidateQueries();
       const result = { ok: true, error: null as string | null, newStock: after, refCode, version: applied.afterVersion };
       await saveIdem(db, key, "createMovement", result);
@@ -702,14 +847,21 @@ export const Actions = {
         }
       }
       const prod = await getProduct(db, mov.productId);
+      let applied: StockApply | null = null;
       if (prod) {
         // revert: set stock back to beforeStock only if current matches afterStock, else adjust by delta
         const delta = mov.afterStock - mov.beforeStock;
         const newStock = Math.max(0, prod.currentStock - delta);
-        const applied = await applyStock(db, prod, newStock, prod.reservedQty);
+        applied = await applyStock(db, prod, newStock, prod.reservedQty);
         if (!applied) return { ok: false, error: VERSION_CONFLICT };
       }
-      await db.delete(schema.movements).where(eq(schema.movements.id, args.id));
+      // Saga: xóa phiếu lỗi sau khi đã áp tồn thì hoàn tồn về.
+      try {
+        await db.delete(schema.movements).where(eq(schema.movements.id, args.id));
+      } catch (e) {
+        const err = await sagaFailed(db, actorName, applied ? [applied] : [], "deleteMovement", e);
+        return { ok: false, error: err };
+      }
       await writeAudit(db, actorName, "delete_movement", "movement", mov.id, { productId: mov.productId, sku: mov.productSku, type: mov.type, quantity: mov.quantity, refCode: mov.refCode });
       ctx.invalidateQueries();
       return { ok: true, error: null };
@@ -929,40 +1081,54 @@ export const Actions = {
       }).returning({ id: schema.orders.id });
       const orderRow = inserted[0];
       if (!orderRow) return { ok: false, error: "Không tạo được đơn.", orderCode: "", id: 0 };
-      await batchAll(db, args.items.map((it) => {
-        const p = prodMap.get(it.productId)!;
-        return db.insert(schema.orderItems).values({
-          orderId: orderRow.id, productId: it.productId, productSku: p.sku, productName: p.name, quantity: it.quantity, unitPrice: it.unitPrice, lineTotal: it.quantity * it.unitPrice, costPrice: p.costPrice,
-        });
-      }));
-      if (shouldDeduct) {
-        // Saga: trừ kho từng dòng (version-checked); 1 dòng lỗi thì bù trừ hoàn lại rồi xoá đơn vừa tạo.
-        const applied: StockApply[] = [];
-        const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
-        for (const it of args.items) {
+      // Saga: mọi bước ghi sau đây lỗi đều dọn đơn/dòng/phiếu vừa ghi + hoàn tồn.
+      // (orderCode mới sinh nên chưa có phiếu nào khác mang mã này.)
+      const applied: StockApply[] = [];
+      const movIds: number[] = [];
+      const deleteOrderAndItems = async () => {
+        await db.delete(schema.orderItems).where(eq(schema.orderItems.orderId, orderRow.id));
+        await db.delete(schema.orders).where(eq(schema.orders.id, orderRow.id));
+      };
+      try {
+        await batchAll(db, args.items.map((it) => {
           const p = prodMap.get(it.productId)!;
-          const before = p.currentStock;
-          const after = before - it.quantity;
-          const afterReserved = isReserved ? p.reservedQty + it.quantity : p.reservedQty;
-          const one = await applyStock(db, p, after, afterReserved);
-          if (!one) {
-            await compensateStock(db, applied);
-            await db.delete(schema.orderItems).where(eq(schema.orderItems.orderId, orderRow.id));
-            await db.delete(schema.orders).where(eq(schema.orders.id, orderRow.id));
-            return { ok: false, error: VERSION_CONFLICT, orderCode: "", id: 0 };
+          return db.insert(schema.orderItems).values({
+            orderId: orderRow.id, productId: it.productId, productSku: p.sku, productName: p.name, quantity: it.quantity, unitPrice: it.unitPrice, lineTotal: it.quantity * it.unitPrice, costPrice: p.costPrice,
+          });
+        }));
+        if (shouldDeduct) {
+          // Trừ kho từng dòng (version-checked); 1 dòng lỗi thì bù trừ hoàn lại rồi xoá đơn vừa tạo.
+          const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
+          for (const it of args.items) {
+            const p = prodMap.get(it.productId)!;
+            const before = p.currentStock;
+            const after = before - it.quantity;
+            const afterReserved = isReserved ? p.reservedQty + it.quantity : p.reservedQty;
+            const one = await applyStock(db, p, after, afterReserved);
+            if (!one) {
+              const failedN = await rollbackApplied(db, actorName, applied, "createOrder");
+              await deleteOrderAndItems();
+              return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, orderCode: "", id: 0 };
+            }
+            trackApplied(p, one);
+            applied.push(one);
+            movData.push({ prod: p, before, after, qty: it.quantity });
           }
-          trackApplied(p, one);
-          applied.push(one);
-          movData.push({ prod: p, before, after, qty: it.quantity });
+          await insertMovements(db, movData.map((m) => ({
+            productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "out", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
+            unitCost: args.items.find((i) => i.productId === m.prod.id)?.unitPrice ?? 0,
+            reason: isReserved ? "Giữ hàng theo đơn" : "Xuất theo đơn hàng", refCode: orderCode, partner: args.customerName.trim(), note: `Đơn ${orderCode}`, actor: actorName,
+          })), movIds);
         }
-        await batchAll(db, movData.map((m) => db.insert(schema.movements).values({
-          productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "out", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
-          unitCost: args.items.find((i) => i.productId === m.prod.id)?.unitPrice ?? 0,
-          reason: isReserved ? "Giữ hàng theo đơn" : "Xuất theo đơn hàng", refCode: orderCode, partner: args.customerName.trim(), note: `Đơn ${orderCode}`, actor: actorName,
-        })));
-      }
-      if (shouldDeduct) {
-        await createReceivableDebtIfNeeded(db, { orderCode, customerName: args.customerName.trim(), totalAmount, depositAmount });
+        if (shouldDeduct) {
+          await createReceivableDebtIfNeeded(db, { id: orderRow.id, orderCode, customerName: args.customerName.trim() });
+        }
+      } catch (e) {
+        const err = await sagaFailed(db, actorName, applied, "createOrder", e, async () => {
+          await deleteMovementsByIds(db, movIds);
+          await deleteOrderAndItems();
+        });
+        return { ok: false, error: err, orderCode: "", id: 0 };
       }
       await writeAudit(db, actorName, "create_order", "order", orderRow.id, { orderCode, status: args.status, totalAmount, depositAmount });
       ctx.invalidateQueries();
@@ -1017,13 +1183,22 @@ export const Actions = {
           if (wasDeducted) {
             // confirmed -> reserved: kho đã trừ, chỉ cộng số lượng giữ.
             const applied: StockApply[] = [];
-            for (const it of items) {
-              const p = prodById.get(it.productId);
-              if (!p) return { ok: false, error: `Sản phẩm "${it.productName}" (${it.productSku}) trong đơn đã bị xoá khỏi kho — không thể chuyển sang giữ hàng.`, pendingRestocks };
-              const one = await applyStock(db, p, p.currentStock, p.reservedQty + it.quantity);
-              if (!one) { await compensateStock(db, applied); return { ok: false, error: VERSION_CONFLICT, pendingRestocks }; }
-              trackApplied(p, one);
-              applied.push(one);
+            try {
+              for (const it of items) {
+                const p = prodById.get(it.productId);
+                if (!p) return { ok: false, error: `Sản phẩm "${it.productName}" (${it.productSku}) trong đơn đã bị xoá khỏi kho — không thể chuyển sang giữ hàng.`, pendingRestocks };
+                const one = await applyStock(db, p, p.currentStock, p.reservedQty + it.quantity);
+                if (!one) {
+                  const failedN = await rollbackApplied(db, actorName, applied, "updateOrderStatus(reserved)");
+                  return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, pendingRestocks };
+                }
+                trackApplied(p, one);
+                applied.push(one);
+              }
+              await db.update(schema.orders).set({ status: "reserved", stockDeducted: 1, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+            } catch (e) {
+              const err = await sagaFailed(db, actorName, applied, "updateOrderStatus(reserved)", e);
+              return { ok: false, error: err, pendingRestocks };
             }
           } else {
             // pending -> reserved: trừ kho + cộng số lượng giữ.
@@ -1034,38 +1209,74 @@ export const Actions = {
               if (!p) return { ok: false, error: `Sản phẩm trong đơn đã bị xoá khỏi kho — không thể giữ hàng.`, pendingRestocks };
               if (totalQty > p.currentStock) return { ok: false, error: `"${p.name}" chỉ còn ${p.currentStock}, không đủ để giữ hàng (cần ${totalQty} sau khi cộng dồn các dòng cùng sản phẩm).`, pendingRestocks };
             }
-            const applied: StockApply[] = [];
-            const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
-            for (const it of items) {
-              const p = prodById.get(it.productId)!;
-              const before = p.currentStock; const after = before - it.quantity;
-              const one = await applyStock(db, p, after, p.reservedQty + it.quantity);
-              if (!one) { await compensateStock(db, applied); return { ok: false, error: VERSION_CONFLICT, pendingRestocks }; }
-              trackApplied(p, one);
-              applied.push(one);
-              movData.push({ prod: p, before, after, qty: it.quantity });
+            // Claim nguyên tử: chỉ 1 lần giữ hàng được trừ kho (chống 2 người giữ cùng lúc).
+            const claimed = await db.update(schema.orders)
+              .set({ status: "reserved", stockDeducted: 1, updatedAt: new Date() })
+              .where(and(eq(schema.orders.id, order.id), eq(schema.orders.stockDeducted, 0)))
+              .returning({ id: schema.orders.id });
+            if (!claimed[0]) {
+              const freshRows = await db.select().from(schema.orders).where(eq(schema.orders.id, order.id)).limit(1);
+              const fresh = freshRows[0];
+              if (fresh && fresh.stockDeducted === 1 && fresh.status === "reserved") {
+                // Đơn đã được giữ bởi lần giữ trước (đua nhau): coi như xong (ghi audit + invalidate như cuối hàm).
+                await writeAudit(db, actorName, "update_order_status", "order", order.id, { orderCode: order.orderCode, fromStatus: order.status, toStatus: target, pendingRestocks: pendingRestocks.length, note: "Đã giữ hàng bởi thao tác khác (đua nhau)" });
+                ctx.invalidateQueries();
+                return { ok: true, error: null, pendingRestocks };
+              }
+              return { ok: false, error: VERSION_CONFLICT, pendingRestocks };
             }
-            await batchAll(db, movData.map((m) => db.insert(schema.movements).values({
-              productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "out", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
-              unitCost: items.find((i) => i.productId === m.prod.id)?.unitPrice ?? 0,
-              reason: "Giữ hàng theo đơn", refCode: order.orderCode, partner: order.customerName, note: `Đơn ${order.orderCode}`, actor: actorName,
-            })));
+            const applied: StockApply[] = [];
+            const movIds: number[] = [];
+            const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
+            try {
+              for (const it of items) {
+                const p = prodById.get(it.productId)!;
+                const before = p.currentStock; const after = before - it.quantity;
+                const one = await applyStock(db, p, after, p.reservedQty + it.quantity);
+                if (!one) {
+                  const failedN = await rollbackApplied(db, actorName, applied, "updateOrderStatus(reserved)");
+                  await db.update(schema.orders).set({ status: order.status, stockDeducted: 0, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+                  return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, pendingRestocks };
+                }
+                trackApplied(p, one);
+                applied.push(one);
+                movData.push({ prod: p, before, after, qty: it.quantity });
+              }
+              await insertMovements(db, movData.map((m) => ({
+                productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "out", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
+                unitCost: items.find((i) => i.productId === m.prod.id)?.unitPrice ?? 0,
+                reason: "Giữ hàng theo đơn", refCode: order.orderCode, partner: order.customerName, note: `Đơn ${order.orderCode}`, actor: actorName,
+              })), movIds);
+            } catch (e) {
+              const err = await sagaFailed(db, actorName, applied, "updateOrderStatus(reserved)", e, async () => {
+                await deleteMovementsByIds(db, movIds);
+                await db.update(schema.orders).set({ status: order.status, stockDeducted: 0, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+              });
+              return { ok: false, error: err, pendingRestocks };
+            }
           }
-          await db.update(schema.orders).set({ status: "reserved", stockDeducted: 1, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
         }
       } else if (shouldDeductTarget) {
         if (isReservedOrder && wasDeducted) {
           // reserved -> confirmed/delivering/completed: kho đã trừ, chỉ trừ số lượng giữ.
           const applied: StockApply[] = [];
-          for (const it of items) {
-            const p = prodById.get(it.productId);
-            if (!p) return { ok: false, error: `Sản phẩm "${it.productName}" (${it.productSku}) trong đơn đã bị xoá khỏi kho — không thể xác nhận đơn.`, pendingRestocks };
-            const one = await applyStock(db, p, p.currentStock, Math.max(0, p.reservedQty - it.quantity));
-            if (!one) { await compensateStock(db, applied); return { ok: false, error: VERSION_CONFLICT, pendingRestocks }; }
-            trackApplied(p, one);
-            applied.push(one);
+          try {
+            for (const it of items) {
+              const p = prodById.get(it.productId);
+              if (!p) return { ok: false, error: `Sản phẩm "${it.productName}" (${it.productSku}) trong đơn đã bị xoá khỏi kho — không thể xác nhận đơn.`, pendingRestocks };
+              const one = await applyStock(db, p, p.currentStock, Math.max(0, p.reservedQty - it.quantity));
+              if (!one) {
+                const failedN = await rollbackApplied(db, actorName, applied, "updateOrderStatus(confirm-reserved)");
+                return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, pendingRestocks };
+              }
+              trackApplied(p, one);
+              applied.push(one);
+            }
+            await db.update(schema.orders).set({ status: target, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+          } catch (e) {
+            const err = await sagaFailed(db, actorName, applied, "updateOrderStatus(confirm-reserved)", e);
+            return { ok: false, error: err, pendingRestocks };
           }
-          await db.update(schema.orders).set({ status: target, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
         } else if (!wasDeducted) {
           // Cộng dồn dòng cùng sản phẩm + chặn khi sản phẩm đã bị xoá: không được đánh dấu đã trừ kho khi không có phiếu xuất tương ứng.
           const qtyByProduct = new Map<number, number>();
@@ -1079,40 +1290,79 @@ export const Actions = {
             const p = prodById.get(pid)!;
             if (totalQty > p.currentStock) return { ok: false, error: `"${p.name}" chỉ còn ${p.currentStock}, không đủ để xác nhận đơn (cần ${totalQty} sau khi cộng dồn các dòng cùng sản phẩm).`, pendingRestocks };
           }
-          const applied: StockApply[] = [];
-          const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
-          for (const it of items) {
-            const p = prodById.get(it.productId)!;
-            const before = p.currentStock; const after = before - it.quantity;
-            const one = await applyStock(db, p, after, p.reservedQty);
-            if (!one) { await compensateStock(db, applied); return { ok: false, error: VERSION_CONFLICT, pendingRestocks }; }
-            trackApplied(p, one);
-            applied.push(one);
-            movData.push({ prod: p, before, after, qty: it.quantity });
+          // Claim nguyên tử: chỉ 1 lần xác nhận được trừ kho (chống 2 người xác nhận cùng lúc).
+          const claimed = await db.update(schema.orders)
+            .set({ status: target, stockDeducted: 1, updatedAt: new Date() })
+            .where(and(eq(schema.orders.id, order.id), eq(schema.orders.stockDeducted, 0)))
+            .returning({ id: schema.orders.id });
+          if (!claimed[0]) {
+            const freshRows = await db.select().from(schema.orders).where(eq(schema.orders.id, order.id)).limit(1);
+            const fresh = freshRows[0];
+            if (fresh && fresh.stockDeducted === 1 && fresh.status === target) {
+              // Đơn đã được xác nhận bởi lần xác nhận trước (đua nhau): coi như xong.
+              await createReceivableDebtIfNeeded(db, { id: order.id, orderCode: order.orderCode, customerName: order.customerName });
+              await writeAudit(db, actorName, "update_order_status", "order", order.id, { orderCode: order.orderCode, fromStatus: order.status, toStatus: target, pendingRestocks: pendingRestocks.length, note: "Đã xác nhận bởi thao tác khác (đua nhau)" });
+              ctx.invalidateQueries();
+              return { ok: true, error: null, pendingRestocks };
+            }
+            return { ok: false, error: VERSION_CONFLICT, pendingRestocks };
           }
-          await batchAll(db, movData.map((m) => db.insert(schema.movements).values({
-            productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "out", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
-            unitCost: items.find((i) => i.productId === m.prod.id)?.unitPrice ?? 0,
-            reason: "Xuất theo đơn hàng", refCode: order.orderCode, partner: order.customerName, note: `Đơn ${order.orderCode}`, actor: actorName,
-          })));
-          await db.update(schema.orders).set({ status: target, stockDeducted: 1, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+          const applied: StockApply[] = [];
+          const movIds: number[] = [];
+          const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
+          try {
+            for (const it of items) {
+              const p = prodById.get(it.productId)!;
+              const before = p.currentStock; const after = before - it.quantity;
+              const one = await applyStock(db, p, after, p.reservedQty);
+              if (!one) {
+                const failedN = await rollbackApplied(db, actorName, applied, "updateOrderStatus(confirm)");
+                await db.update(schema.orders).set({ status: order.status, stockDeducted: 0, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+                return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, pendingRestocks };
+              }
+              trackApplied(p, one);
+              applied.push(one);
+              movData.push({ prod: p, before, after, qty: it.quantity });
+            }
+            await insertMovements(db, movData.map((m) => ({
+              productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "out", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
+              unitCost: items.find((i) => i.productId === m.prod.id)?.unitPrice ?? 0,
+              reason: "Xuất theo đơn hàng", refCode: order.orderCode, partner: order.customerName, note: `Đơn ${order.orderCode}`, actor: actorName,
+            })), movIds);
+            await createReceivableDebtIfNeeded(db, { id: order.id, orderCode: order.orderCode, customerName: order.customerName });
+          } catch (e) {
+            const err = await sagaFailed(db, actorName, applied, "updateOrderStatus(confirm)", e, async () => {
+              await deleteMovementsByIds(db, movIds);
+              await db.update(schema.orders).set({ status: order.status, stockDeducted: 0, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+            });
+            return { ok: false, error: err, pendingRestocks };
+          }
         } else {
           await db.update(schema.orders).set({ status: target, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+          await createReceivableDebtIfNeeded(db, { id: order.id, orderCode: order.orderCode, customerName: order.customerName });
         }
-        await createReceivableDebtIfNeeded(db, { orderCode: order.orderCode, customerName: order.customerName, totalAmount: order.totalAmount, depositAmount: order.depositAmount });
       } else if (target === "cancelled" || (target === "pending" && isReservedOrder)) {
         if (wasDeducted) {
+          // Chỉ hoàn kho khi thực sự có phiếu xuất cho đơn (chống cộng thừa khi cờ
+          // đã trừ kho được đặt nhưng tồn chưa kịp trừ — cửa sổ giữa claim và áp tồn).
+          const orderMovs = await db.select().from(schema.movements).where(eq(schema.movements.refCode, order.orderCode));
+          const hasOutEvidence = (productId: number) => orderMovs.some((m) => m.productId === productId && m.type === "out");
           const applied: StockApply[] = [];
+          const movIds: number[] = [];
           const movData: { prod: ProdRow; before: number; after: number; qty: number }[] = [];
           for (const it of items) {
             // Chỉ hoàn lại phần CHƯA trả (net = số lượng − đã trả): hàng đã trả khách
             // trước đó đã được cộng lại kho lúc trả, hủy đơn không được cộng lần nữa.
             const netQty = Math.max(0, it.quantity - (it.returnedQty ?? 0));
+            if (netQty <= 0) continue; // dòng này đã trả hết: không sinh phiếu hoàn kho
+            if (!hasOutEvidence(it.productId)) continue; // chưa từng trừ kho cho dòng này: không có gì để hoàn
             const p = prodById.get(it.productId);
             if (!p || p.status === "discontinued") {
-              // Không bỏ qua im lặng: ghi vào phiếu chờ hoàn kho để xử lý sau.
-              if (netQty > 0) {
-                pendingRestocks.push({ productName: it.productName, quantity: netQty });
+              // Không bỏ qua im lặng: ghi vào phiếu chờ hoàn kho để xử lý sau (tránh ghi trùng khi thử lại).
+              pendingRestocks.push({ productName: it.productName, quantity: netQty });
+              const dup = await db.select().from(schema.pendingRestocks)
+                .where(and(eq(schema.pendingRestocks.orderCode, order.orderCode), eq(schema.pendingRestocks.productId, it.productId), eq(schema.pendingRestocks.status, "pending"))).limit(1);
+              if (!dup[0]) {
                 await db.insert(schema.pendingRestocks).values({
                   orderCode: order.orderCode, productId: it.productId, productSku: it.productSku, productName: it.productName,
                   quantity: netQty, unitPrice: it.unitPrice, reason: "Sản phẩm đã bị xóa/ngưng khi hủy đơn",
@@ -1120,28 +1370,40 @@ export const Actions = {
               }
               continue;
             }
-            if (netQty <= 0) continue; // dòng này đã trả hết: không sinh phiếu hoàn kho
             const before = p.currentStock; const after = before + netQty;
             const afterReserved = isReservedOrder ? Math.max(0, p.reservedQty - it.quantity) : p.reservedQty;
             const one = await applyStock(db, p, after, afterReserved);
-            if (!one) { await compensateStock(db, applied); return { ok: false, error: VERSION_CONFLICT, pendingRestocks }; }
+            if (!one) {
+              const failedN = await rollbackApplied(db, actorName, applied, "updateOrderStatus(cancel)");
+              return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, pendingRestocks };
+            }
             trackApplied(p, one);
             applied.push(one);
             movData.push({ prod: p, before, after, qty: netQty });
           }
-          if (movData.length > 0) {
-            await batchAll(db, movData.map((m) => db.insert(schema.movements).values({
-              productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "in", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
-              unitCost: items.find((i) => i.productId === m.prod.id)?.unitPrice ?? 0,
-              reason: isReservedOrder ? "Hủy giữ hàng" : "Hoàn kho do huỷ đơn", refCode: order.orderCode, partner: order.customerName, note: target === "cancelled" ? `Huỷ đơn ${order.orderCode}` : `Bỏ giữ hàng đơn ${order.orderCode}`, actor: actorName,
-            })));
+          try {
+            if (movData.length > 0) {
+              await insertMovements(db, movData.map((m) => ({
+                productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "in", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
+                unitCost: items.find((i) => i.productId === m.prod.id)?.unitPrice ?? 0,
+                reason: isReservedOrder ? "Hủy giữ hàng" : "Hoàn kho do huỷ đơn", refCode: order.orderCode, partner: order.customerName, note: target === "cancelled" ? `Huỷ đơn ${order.orderCode}` : `Bỏ giữ hàng đơn ${order.orderCode}`, actor: actorName,
+              })), movIds);
+            }
+            await db.update(schema.orders).set({ status: target, stockDeducted: 0, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+            // Hủy đơn (không áp cho chuyển giữ hàng -> chờ xử lý): void công nợ phải thu của đơn.
+            if (target === "cancelled") await voidReceivableDebtForOrder(db, order.orderCode, actorName);
+          } catch (e) {
+            const err = await sagaFailed(db, actorName, applied, "updateOrderStatus(cancel)", e, async () => {
+              await deleteMovementsByIds(db, movIds);
+              await db.update(schema.orders).set({ status: order.status, stockDeducted: 1, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+            });
+            return { ok: false, error: err, pendingRestocks };
           }
-          await db.update(schema.orders).set({ status: target, stockDeducted: 0, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
         } else {
           await db.update(schema.orders).set({ status: target, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+          // Hủy đơn (không áp cho chuyển giữ hàng -> chờ xử lý): void công nợ phải thu của đơn.
+          if (target === "cancelled") await voidReceivableDebtForOrder(db, order.orderCode, actorName);
         }
-        // Hủy đơn (không áp cho chuyển giữ hàng -> chờ xử lý): void công nợ phải thu của đơn.
-        if (target === "cancelled") await voidReceivableDebtForOrder(db, order.orderCode, actorName);
       } else {
         await db.update(schema.orders).set({ status: target, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
       }
@@ -1213,20 +1475,29 @@ export const Actions = {
         const before = p.currentStock;
         const after = args.type === "in" ? before + line.quantity : before - line.quantity;
         const one = await applyStock(db, p, after, p.reservedQty);
-        if (!one) { await compensateStock(db, applied); return { ok: false, error: VERSION_CONFLICT, refCode: "", results: [] }; }
+        if (!one) {
+          const failedN = await rollbackApplied(db, actorName, applied, "createMovementBatch");
+          return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, refCode: "", results: [] };
+        }
         trackApplied(p, one);
         applied.push(one);
         movData.push({ prod: p, before, after, line });
       }
-      await batchAll(db, [
-        ...movData.map((m) => db.insert(schema.movements).values({
+      // Saga: ghi phiếu lỗi sau khi đã áp tồn thì xóa phiếu vừa ghi + hoàn tồn.
+      const movIds: number[] = [];
+      try {
+        await insertMovements(db, movData.map((m) => ({
           productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: args.type, quantity: m.line.quantity,
           beforeStock: m.before, afterStock: m.after,
           unitCost: m.line.unitCost !== undefined && m.line.unitCost > 0 ? m.line.unitCost : (args.type === "in" ? m.prod.costPrice : m.prod.sellPrice),
           reason: m.line.reason, refCode, partner: m.line.partner.trim(), note: m.line.note.trim(), actor: actorName,
-        })),
-        db.insert(schema.auditLogs).values({ actor: actorName, action: "create_movement_batch", entity: "movement", entityId: 0, details: JSON.stringify({ type: args.type, refCode, lines: args.lines.length }) }),
-      ]);
+        })), movIds);
+      } catch (e) {
+        const err = await sagaFailed(db, actorName, applied, "createMovementBatch", e, async () => { await deleteMovementsByIds(db, movIds); });
+        return { ok: false, error: err, refCode: "", results: [] };
+      }
+      // Audit là nhật ký (best-effort): ghi lỗi cũng không được làm hỏng phiếu đã ghi xong.
+      await writeAudit(db, actorName, "create_movement_batch", "movement", 0, { type: args.type, refCode, lines: args.lines.length }).catch(() => {});
       ctx.invalidateQueries();
       const result = {
         ok: true, error: null as string | null, refCode,
@@ -1280,7 +1551,10 @@ export const Actions = {
         const before = li.prod.currentStock;
         const after = before + li.qty;
         const one = await applyStock(db, li.prod, after, li.prod.reservedQty);
-        if (!one) { await compensateStock(db, applied); return { ok: false, error: VERSION_CONFLICT, refCode: "", newStatus: order.status }; }
+        if (!one) {
+          const failedN = await rollbackApplied(db, actorName, applied, "createReturn");
+          return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, refCode: "", newStatus: order.status };
+        }
         trackApplied(li.prod, one);
         applied.push(one);
         movData.push({ prod: li.prod, before, after, qty: li.qty, unitPrice: li.item.unitPrice });
@@ -1292,29 +1566,43 @@ export const Actions = {
       const newStatus = allReturned ? "returned" : "partially_returned";
       const debtRows = await db.select().from(schema.debts).where(eq(schema.debts.refCode, order.orderCode));
       const debt = debtRows.find((d) => d.kind === "receivable" && d.status !== "cancelled");
-      const stmts: BatchItem<"sqlite">[] = [
-        ...movData.map((m) => db.insert(schema.movements).values({
+      // Saga: ghi tuần tự (phiếu -> số lượng đã trả -> trạng thái đơn -> công nợ ->
+      // trạng thái thanh toán); bước nào lỗi cũng dọn các bước trước + hoàn tồn.
+      // Cọc KHÔNG đổi khi trả hàng: chỉ tính lại paymentStatus theo netPayable.
+      const movIds: number[] = [];
+      const oldReturned = lineItems.map((li) => ({ id: li.item.id, returnedQty: li.item.returnedQty }));
+      const oldDebt = debt ? { id: debt.id, totalAmount: debt.totalAmount, status: debt.status, note: debt.note } : null;
+      try {
+        await insertMovements(db, movData.map((m) => ({
           productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "in", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
           unitCost: m.unitPrice, reason: `Trả hàng từ đơn ${order.orderCode}`, refCode: order.orderCode, partner: order.customerName,
           note: args.reason.trim() || `Trả hàng đơn ${order.orderCode}`, actor: actorName,
-        })),
-        ...lineItems.map((li) => db.update(schema.orderItems).set({ returnedQty: li.item.returnedQty + li.qty }).where(eq(schema.orderItems.id, li.item.id))),
-        db.update(schema.orders).set({ status: newStatus, updatedAt: new Date() }).where(eq(schema.orders.id, order.id)),
-      ];
-      if (debt) {
-        const newTotal = Math.max(0, debt.totalAmount - refundTotal);
-        const newNote = debt.note ? `${debt.note} | Đã trừ trả hàng: ${refundTotal.toLocaleString("vi-VN")}đ (đơn ${order.orderCode})` : `Đã trừ trả hàng: ${refundTotal.toLocaleString("vi-VN")}đ (đơn ${order.orderCode})`;
-        stmts.push(db.update(schema.debts).set({
-          totalAmount: newTotal, note: newNote,
-          status: newTotal - debt.paidAmount <= 0 ? "paid" : debt.status,
-        }).where(eq(schema.debts.id, debt.id)));
-      }
-      await batchAll(db, stmts);
-      // Trả hàng làm công nợ về 0 thì đồng bộ trạng thái thanh toán của đơn
-      // (đơn coi như đã thanh toán đủ — không còn nợ).
-      if (debt) {
-        const debtRemainingAfter = Math.max(0, Math.max(0, debt.totalAmount - refundTotal) - debt.paidAmount);
-        if (debtRemainingAfter === 0) await syncOrderPaymentFromDebt(db, order.orderCode, refundTotal, 0);
+        })), movIds);
+        for (const li of lineItems) {
+          await db.update(schema.orderItems).set({ returnedQty: li.item.returnedQty + li.qty }).where(eq(schema.orderItems.id, li.item.id));
+        }
+        await db.update(schema.orders).set({ status: newStatus, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+        if (debt) {
+          const newTotal = Math.max(0, debt.totalAmount - refundTotal);
+          const newNote = debt.note ? `${debt.note} | Đã trừ trả hàng: ${refundTotal.toLocaleString("vi-VN")}đ (đơn ${order.orderCode})` : `Đã trừ trả hàng: ${refundTotal.toLocaleString("vi-VN")}đ (đơn ${order.orderCode})`;
+          await db.update(schema.debts).set({
+            totalAmount: newTotal, note: newNote,
+            status: newTotal - debt.paidAmount <= 0 ? "paid" : debt.status,
+          }).where(eq(schema.debts.id, debt.id));
+        }
+        await refreshOrderPaymentStatus(db, order.id);
+      } catch (e) {
+        const err = await sagaFailed(db, actorName, applied, "createReturn", e, async () => {
+          await deleteMovementsByIds(db, movIds);
+          for (const o of oldReturned) {
+            await db.update(schema.orderItems).set({ returnedQty: o.returnedQty }).where(eq(schema.orderItems.id, o.id));
+          }
+          await db.update(schema.orders).set({ status: order.status, paymentStatus: order.paymentStatus }).where(eq(schema.orders.id, order.id));
+          if (oldDebt) {
+            await db.update(schema.debts).set({ totalAmount: oldDebt.totalAmount, status: oldDebt.status, note: oldDebt.note }).where(eq(schema.debts.id, oldDebt.id));
+          }
+        });
+        return { ok: false, error: err, refCode: "", newStatus: order.status };
       }
       await writeAudit(db, actorName, "create_return", "order", order.id, { orderCode: order.orderCode, refundTotal, newStatus, reason: args.reason.trim() });
       ctx.invalidateQueries();
@@ -1337,11 +1625,15 @@ export const Actions = {
       const orderRows = await db.select().from(schema.orders).where(eq(schema.orders.id, args.orderId));
       const order = orderRows[0];
       if (!order) return { ok: false, error: "Không tìm thấy đơn hàng.", depositAmount: 0, paymentStatus: "" };
+      // Cọc so với số thực phải trả (netPayable = tổng − đã hoàn hàng), không phải
+      // tổng gốc: trả hàng rồi thì khách chỉ còn phải trả phần hàng giữ lại.
+      const refunded = await refundedTotalOfOrder(db, order.id);
+      const netPayable = order.totalAmount - refunded;
       const newDeposit = order.depositAmount + args.amount;
-      if (newDeposit > order.totalAmount) {
-        return { ok: false, error: `Tiền cọc (${newDeposit.toLocaleString("vi-VN")}đ) vượt quá tổng tiền đơn (${order.totalAmount.toLocaleString("vi-VN")}đ).`, depositAmount: order.depositAmount, paymentStatus: order.paymentStatus };
+      if (newDeposit > netPayable) {
+        return { ok: false, error: `Tiền cọc (${newDeposit.toLocaleString("vi-VN")}đ) vượt quá số còn phải trả (${netPayable.toLocaleString("vi-VN")}đ) sau khi trừ hàng đã trả.`, depositAmount: order.depositAmount, paymentStatus: order.paymentStatus };
       }
-      const paymentStatus = newDeposit >= order.totalAmount ? "paid" : "partial";
+      const paymentStatus = paymentStatusOf(netPayable, newDeposit);
       await db.update(schema.orders).set({ depositAmount: newDeposit, paymentStatus, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
       const debtRows = await db.select().from(schema.debts).where(eq(schema.debts.refCode, order.orderCode));
       const debt = debtRows.find((d) => d.kind === "receivable" && d.status !== "cancelled");
@@ -1379,21 +1671,32 @@ export const Actions = {
         if (!prod) continue; // sản phẩm đã xoá: không hoàn được kho, đơn vẫn huỷ (ghi chú trong audit)
         const before = prod.currentStock; const after = before + it.quantity;
         const one = await applyStock(db, prod, after, Math.max(0, prod.reservedQty - it.quantity));
-        if (!one) { await compensateStock(db, applied); return { ok: false, error: VERSION_CONFLICT }; }
+        if (!one) {
+          const failedN = await rollbackApplied(db, actorName, applied, "releaseReservation");
+          return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT };
+        }
         trackApplied(prod, one);
         applied.push(one);
         movData.push({ prod, before, after, qty: it.quantity });
       }
-      await batchAll(db, [
-        ...movData.map((m) => db.insert(schema.movements).values({
+      // Saga: ghi phiếu + đổi trạng thái đơn + void công nợ lỗi thì dọn + hoàn tồn.
+      const movIds: number[] = [];
+      try {
+        await insertMovements(db, movData.map((m) => ({
           productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "in", quantity: m.qty, beforeStock: m.before, afterStock: m.after,
           unitCost: items.find((i) => i.productId === m.prod.id)?.unitPrice ?? 0,
           reason: "Hủy giữ hàng", refCode: order.orderCode, partner: order.customerName, note: `Hủy giữ hàng đơn ${order.orderCode}`, actor: actorName,
-        })),
-        db.update(schema.orders).set({ status: "cancelled", stockDeducted: 0, updatedAt: new Date() }).where(eq(schema.orders.id, order.id)),
-      ]);
-      // Đơn giữ hàng cũng đã sinh công nợ phải thu lúc tạo: hủy giữ thì void công nợ như hủy đơn.
-      await voidReceivableDebtForOrder(db, order.orderCode, actorName);
+        })), movIds);
+        await db.update(schema.orders).set({ status: "cancelled", stockDeducted: 0, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+        // Đơn giữ hàng cũng đã sinh công nợ phải thu lúc tạo: hủy giữ thì void công nợ như hủy đơn.
+        await voidReceivableDebtForOrder(db, order.orderCode, actorName);
+      } catch (e) {
+        const err = await sagaFailed(db, actorName, applied, "releaseReservation", e, async () => {
+          await deleteMovementsByIds(db, movIds);
+          await db.update(schema.orders).set({ status: order.status, stockDeducted: 1, updatedAt: new Date() }).where(eq(schema.orders.id, order.id));
+        });
+        return { ok: false, error: err };
+      }
       await writeAudit(db, actorName, "release_reservation", "order", order.id, { orderCode: order.orderCode });
       ctx.invalidateQueries();
       return { ok: true, error: null };
@@ -1436,18 +1739,29 @@ export const Actions = {
       for (const d of diffs) {
         const prod = products.find((p) => p.id === d.productId)!;
         const one = await applyStock(db, prod, d.calculatedStock, prod.reservedQty);
-        if (!one) { await compensateStock(db, applied); return { ok: false, error: VERSION_CONFLICT, applied: false, diffs }; }
+        if (!one) {
+          const failedN = await rollbackApplied(db, actorName, applied, "reconcileStock");
+          return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, applied: false, diffs };
+        }
         trackApplied(prod, one);
         applied.push(one);
         movData.push({ prod, before: d.systemStock, after: d.calculatedStock });
       }
-      await batchAll(db, [
-        ...movData.map((m) => db.insert(schema.movements).values({
+      // Saga: ghi phiếu lỗi sau khi đã áp tồn thì xóa phiếu vừa ghi + hoàn tồn.
+      const movIds: number[] = [];
+      try {
+        await insertMovements(db, movData.map((m) => ({
           productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "adjust", quantity: Math.abs(m.after - m.before),
           beforeStock: m.before, afterStock: m.after, unitCost: m.prod.costPrice, reason: "Đối chiếu tồn kho", refCode: genRefCode("adjust"), partner: "", note: "Đối chiếu tồn kho", actor: actorName,
-        })),
-        ...movData.map((m) => db.insert(schema.auditLogs).values({ actor: actorName, action: "reconcile_stock", entity: "product", entityId: m.prod.id, details: JSON.stringify({ sku: m.prod.sku, systemStock: m.before, calculatedStock: m.after }) })),
-      ]);
+        })), movIds);
+      } catch (e) {
+        const err = await sagaFailed(db, actorName, applied, "reconcileStock", e, async () => { await deleteMovementsByIds(db, movIds); });
+        return { ok: false, error: err, applied: false, diffs };
+      }
+      // Audit là nhật ký (best-effort).
+      for (const m of movData) {
+        await writeAudit(db, actorName, "reconcile_stock", "product", m.prod.id, { sku: m.prod.sku, systemStock: m.before, calculatedStock: m.after }).catch(() => {});
+      }
       ctx.invalidateQueries();
       return { ok: true, error: null, applied: true, diffs };
     },
@@ -1497,13 +1811,21 @@ export const Actions = {
       const after = before + item.quantity;
       const applied = await applyStock(db, prod, after, prod.reservedQty);
       if (!applied) return { ok: false, error: VERSION_CONFLICT };
-      await batchAll(db, [
-        db.insert(schema.movements).values({
+      // Saga: ghi phiếu / đánh dấu đã xử lý lỗi sau khi đã áp tồn thì xóa phiếu vừa ghi + hoàn tồn.
+      const movIds: number[] = [];
+      try {
+        await insertMovements(db, [{
           productId: prod.id, productSku: prod.sku, productName: prod.name, type: "in", quantity: item.quantity,
           beforeStock: before, afterStock: after, unitCost: item.unitPrice, reason: "Hoàn kho chờ xử lý", refCode: item.orderCode, partner: "", note: `Hoàn kho chờ xử lý từ đơn ${item.orderCode}`, actor: actorName,
-        }),
-        db.update(schema.pendingRestocks).set({ status: "resolved", resolvedAt: new Date() }).where(eq(schema.pendingRestocks.id, item.id)),
-      ]);
+        }], movIds);
+        await db.update(schema.pendingRestocks).set({ status: "resolved", resolvedAt: new Date() }).where(eq(schema.pendingRestocks.id, item.id));
+      } catch (e) {
+        const err = await sagaFailed(db, actorName, [applied], "resolvePendingRestock", e, async () => {
+          await deleteMovementsByIds(db, movIds);
+          await db.update(schema.pendingRestocks).set({ status: "pending", resolvedAt: null }).where(eq(schema.pendingRestocks.id, item.id));
+        });
+        return { ok: false, error: err };
+      }
       await writeAudit(db, actorName, "resolve_pending_restock", "pending_restock", item.id, { orderCode: item.orderCode, productId: prod.id, sku: prod.sku, quantity: item.quantity });
       ctx.invalidateQueries();
       return { ok: true, error: null };
@@ -1855,12 +2177,27 @@ export const Actions = {
           returnedQty: (i["returnedQty"] as number) ?? 0, costPrice: (i["costPrice"] as number) ?? 0,
         });
       }
+      // Khôi phục công nợ: unique index 0005 chỉ cho phép 1 khoản đang hoạt động
+      // cho mỗi (refCode, kind) — bản sao lưu cũ có thể chứa khoản trùng do lỗi
+      // nhân công nợ trước đây: chỉ giữ khoản mới nhất, khoản cũ hơn khôi phục
+      // dạng "cancelled" để không mất lịch sử mà vẫn đúng ràng buộc.
+      const seenActiveDebt = new Set<string>();
       for (const d of arr("debts")) {
+        const status = (d["status"] as "open" | "paid" | "overdue" | "cancelled") ?? "open";
+        const key = `${String(d["refCode"] ?? "")}|${(d["kind"] as string) ?? "receivable"}`;
+        let finalStatus = status;
+        if ((status === "open" || status === "overdue") && seenActiveDebt.has(key)) {
+          finalStatus = "cancelled";
+        }
+        if (status === "open" || status === "overdue") seenActiveDebt.add(key);
         await db.insert(schema.debts).values({
           id: d["id"] as number, partnerName: String(d["partnerName"] ?? ""), partnerType: (d["partnerType"] as "customer" | "supplier") ?? "customer",
           kind: (d["kind"] as "receivable" | "payable") ?? "receivable", totalAmount: (d["totalAmount"] as number) ?? 0,
           paidAmount: (d["paidAmount"] as number) ?? 0, dueDate: String(d["dueDate"] ?? ""), refCode: String(d["refCode"] ?? ""),
-          note: String(d["note"] ?? ""), status: (d["status"] as "open" | "paid" | "overdue" | "cancelled") ?? "open", createdAt: toDate(d["createdAt"]),
+          note: finalStatus === "cancelled" && status !== "cancelled"
+            ? `${String(d["note"] ?? "")} | Dọn trùng khi khôi phục — chỉ giữ 1 công nợ đang hoạt động cho mỗi đơn`
+            : String(d["note"] ?? ""),
+          status: finalStatus, createdAt: toDate(d["createdAt"]),
         });
       }
       for (const dp of arr("debtPayments")) {
@@ -1963,14 +2300,22 @@ export const Actions = {
       }
       const newPaid = debt.paidAmount + args.amount;
       const newRemaining = Math.max(0, debt.totalAmount - newPaid);
-      await batchAll(db, [
-        db.update(schema.debts).set({ paidAmount: newPaid, status: newRemaining === 0 ? "paid" : debt.status }).where(eq(schema.debts.id, debt.id)),
-        db.insert(schema.debtPayments).values({ debtId: debt.id, amount: args.amount, method: args.method.trim(), note: args.note.trim() }),
-      ]);
-      // Đồng bộ đơn hàng gắn với công nợ phải thu này: tiền vừa thu cộng vào cọc,
-      // thu đủ thì đơn chuyển sang đã thanh toán đủ.
+      // batch() không phải transaction: ghi phiếu thu lỗi sau khi đã cập nhật công
+      // nợ thì hoàn lại công nợ, không để tiền đã thu không có phiếu.
+      try {
+        await batchAll(db, [
+          db.update(schema.debts).set({ paidAmount: newPaid, status: newRemaining === 0 ? "paid" : debt.status }).where(eq(schema.debts.id, debt.id)),
+          db.insert(schema.debtPayments).values({ debtId: debt.id, amount: args.amount, method: args.method.trim(), note: args.note.trim() }),
+        ]);
+      } catch (e) {
+        await db.update(schema.debts).set({ paidAmount: debt.paidAmount, status: debt.status }).where(eq(schema.debts.id, debt.id)).catch(() => {});
+        const detail = e instanceof Error ? e.message : String(e);
+        return { ok: false, error: `Ghi khoản thu thất bại (${detail}), công nợ giữ nguyên. Vui lòng thử lại.`, remaining };
+      }
+      // Đồng bộ đơn hàng gắn với công nợ phải thu này: tiền vừa thu THỰC cộng vào
+      // cọc, rồi tính lại trạng thái thanh toán theo netPayable.
       if (debt.kind === "receivable" && debt.refCode) {
-        await syncOrderPaymentFromDebt(db, debt.refCode, args.amount, newRemaining);
+        await addCollectedAndRefresh(db, debt.refCode, args.amount);
       }
       await writeAudit(db, actorName, "record_debt_payment", "debt", debt.id, { partnerName: debt.partnerName, amount: args.amount, method: args.method.trim(), remaining: newRemaining });
       ctx.invalidateQueries();
@@ -2084,37 +2429,71 @@ export const Actions = {
       const items = await db.select().from(schema.stocktakeItems).where(eq(schema.stocktakeItems.stocktakeId, take.id));
       const diffItems = items.filter((i) => i.diffQty !== 0);
       const diffs: { productSku: string; productName: string; systemQty: number; countedQty: number; diff: number; systemQtyAtCount: number; systemQtyAtClose: number; appliedDiff: number }[] = [];
-      const applied: StockApply[] = [];
-      const movData: { prod: ProdRow; item: (typeof items)[number]; before: number; after: number }[] = [];
+      // (a) Validate TOÀN BỘ dòng trước khi áp bất kỳ dòng nào: sản phẩm còn tồn
+      // tại/còn kinh doanh, tồn sau điều chỉnh không âm.
       for (const item of diffItems) {
         const prod = await getProduct(db, item.productId);
         if (!prod || prod.status === "discontinued") return { ok: false, error: `Sản phẩm "${item.productName}" đã bị xoá hoặc ngưng kinh doanh, không thể điều chỉnh tồn.`, diffs };
-        // Chốt theo delta: chênh lệch ghi lúc đếm (đếm − sổ lúc đếm) được cộng vào
-        // tồn HIỆN TẠI lúc chốt, để không nuốt mất hàng nhập/xuất xen giữa lúc đếm và lúc chốt.
-        // VD: sổ lúc đếm 4, đếm được 9 (diff +5), nhập thêm 5 (tồn 9) -> chốt ghi tồn 14.
-        const currentStock = prod.currentStock;
-        const after = currentStock + item.diffQty;
-        if (after < 0) return { ok: false, error: `Không thể chốt kiểm kê: tồn của "${item.productName}" sau điều chỉnh sẽ âm (${after}). Hãy kiểm tra lại số đếm hoặc phiếu nhập/xuất gần đây.`, diffs };
-        const one = await applyStock(db, prod, after, prod.reservedQty);
-        if (!one) { await compensateStock(db, applied); return { ok: false, error: VERSION_CONFLICT, diffs }; }
-        trackApplied(prod, one);
-        applied.push(one);
-        movData.push({ prod, item, before: currentStock, after });
-        // Diffs trả về tính lại theo tồn hiện tại lúc chốt (systemQty = tồn lúc chốt,
-        // diff = đếm − tồn lúc chốt); số điều chỉnh thực tế áp vào kho là appliedDiff.
-        diffs.push({ productSku: item.productSku, productName: item.productName, systemQty: currentStock, countedQty: item.countedQty, diff: item.countedQty - currentStock, systemQtyAtCount: item.systemQty, systemQtyAtClose: currentStock, appliedDiff: item.diffQty });
+        if (prod.currentStock + item.diffQty < 0) return { ok: false, error: `Không thể chốt kiểm kê: tồn của "${item.productName}" sau điều chỉnh sẽ âm (${prod.currentStock + item.diffQty}). Hãy kiểm tra lại số đếm hoặc phiếu nhập/xuất gần đây.`, diffs };
       }
-      await batchAll(db, [
-        ...movData.map((m) => db.insert(schema.movements).values({
+      const applied: StockApply[] = [];
+      const movIds: number[] = [];
+      const movData: { prod: ProdRow; item: (typeof items)[number]; before: number; after: number }[] = [];
+      try {
+        for (const item of diffItems) {
+          // (c) Chốt lại lũy đẳng: dòng nào đã có phiếu adjust mang mã phiếu này thì
+          // bỏ qua (đã áp rồi), không điều chỉnh trùng.
+          const prod = await getProduct(db, item.productId);
+          if (!prod) {
+            const failedN = await rollbackApplied(db, actorName, applied, "closeStocktake");
+            return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : `Sản phẩm "${item.productName}" đã bị xoá hoặc ngưng kinh doanh, không thể điều chỉnh tồn.`, diffs };
+          }
+          const already = await db.select({ id: schema.movements.id }).from(schema.movements)
+            .where(and(eq(schema.movements.refCode, take.code), eq(schema.movements.productId, item.productId), eq(schema.movements.type, "adjust"))).limit(1);
+          if (already[0]) {
+            diffs.push({ productSku: item.productSku, productName: item.productName, systemQty: prod.currentStock, countedQty: item.countedQty, diff: item.countedQty - prod.currentStock, systemQtyAtCount: item.systemQty, systemQtyAtClose: prod.currentStock, appliedDiff: 0 });
+            continue;
+          }
+          // Chốt theo delta: chênh lệch ghi lúc đếm (đếm − sổ lúc đếm) được cộng vào
+          // tồn HIỆN TẠI lúc chốt, để không nuốt mất hàng nhập/xuất xen giữa lúc đếm và lúc chốt.
+          // VD: sổ lúc đếm 4, đếm được 9 (diff +5), nhập thêm 5 (tồn 9) -> chốt ghi tồn 14.
+          // Kiểm tra lại tồn âm với số mới nhất (tồn có thể đổi sau bước validate).
+          const currentStock = prod.currentStock;
+          const after = currentStock + item.diffQty;
+          if (after < 0) {
+            const failedN = await rollbackApplied(db, actorName, applied, "closeStocktake");
+            return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : `Không thể chốt kiểm kê: tồn của "${item.productName}" sau điều chỉnh sẽ âm (${after}). Hãy kiểm tra lại số đếm hoặc phiếu nhập/xuất gần đây.`, diffs };
+          }
+          const one = await applyStock(db, prod, after, prod.reservedQty);
+          if (!one) {
+            const failedN = await rollbackApplied(db, actorName, applied, "closeStocktake");
+            return { ok: false, error: failedN > 0 ? repairNeededMessage(failedN) : VERSION_CONFLICT, diffs };
+          }
+          trackApplied(prod, one);
+          applied.push(one);
+          movData.push({ prod, item, before: currentStock, after });
+          // Diffs trả về tính lại theo tồn hiện tại lúc chốt (systemQty = tồn lúc chốt,
+          // diff = đếm − tồn lúc chốt); số điều chỉnh thực tế áp vào kho là appliedDiff.
+          diffs.push({ productSku: item.productSku, productName: item.productName, systemQty: currentStock, countedQty: item.countedQty, diff: item.countedQty - currentStock, systemQtyAtCount: item.systemQty, systemQtyAtClose: currentStock, appliedDiff: item.diffQty });
+        }
+        // (b) Ghi phiếu + đóng phiếu trong try/catch saga: lỗi nào cũng xóa phiếu
+        // vừa ghi + hoàn tồn đã áp (có kiểm tra + ghi sửa chữa nếu bù không được).
+        await insertMovements(db, movData.map((m) => ({
           productId: m.prod.id, productSku: m.prod.sku, productName: m.prod.name, type: "adjust", quantity: Math.abs(m.item.diffQty),
           beforeStock: m.before, afterStock: m.after, unitCost: m.prod.costPrice,
           reason: `Kiểm kê ${take.code}`, refCode: take.code, partner: "",
           note: `Kiểm kê ${take.code}: đếm ${m.item.countedQty}, sổ lúc đếm ${m.item.systemQty}, sổ lúc chốt ${m.before}, điều chỉnh ${m.item.diffQty > 0 ? "+" : ""}${m.item.diffQty}`,
           actor: actorName,
-        })),
-        ...movData.map((m) => db.insert(schema.auditLogs).values({ actor: actorName, action: "close_stocktake_adjust", entity: "product", entityId: m.prod.id, details: JSON.stringify({ stocktakeCode: take.code, sku: m.prod.sku, systemQtyAtCount: m.item.systemQty, systemQtyAtClose: m.before, countedQty: m.item.countedQty, appliedDiff: m.item.diffQty }) })),
-        db.update(schema.stocktakes).set({ status: "closed", closedAt: new Date() }).where(eq(schema.stocktakes.id, take.id)),
-      ]);
+        })), movIds);
+        await db.update(schema.stocktakes).set({ status: "closed", closedAt: new Date() }).where(eq(schema.stocktakes.id, take.id));
+      } catch (e) {
+        const err = await sagaFailed(db, actorName, applied, "closeStocktake", e, async () => { await deleteMovementsByIds(db, movIds); });
+        return { ok: false, error: err, diffs };
+      }
+      // Audit là nhật ký (best-effort).
+      for (const m of movData) {
+        await writeAudit(db, actorName, "close_stocktake_adjust", "product", m.prod.id, { stocktakeCode: take.code, sku: m.prod.sku, systemQtyAtCount: m.item.systemQty, systemQtyAtClose: m.before, countedQty: m.item.countedQty, appliedDiff: m.item.diffQty }).catch(() => {});
+      }
       await writeAudit(db, actorName, "close_stocktake", "stocktake", take.id, { code: take.code, diffCount: diffItems.length });
       ctx.invalidateQueries();
       return { ok: true, error: null, diffs };

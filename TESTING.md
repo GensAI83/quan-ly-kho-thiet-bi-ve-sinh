@@ -58,3 +58,52 @@ Chạy thử trước khi dùng app cho bán hàng thật. Chuẩn bị: đăng 
 - [ ] Chạy `bun run typecheck` (0 lỗi) sau mọi lần sửa code trong đợt chạy thử.
 - [ ] Đối chiếu cuối ngày: tổng tồn trên app = hàng đếm tay; doanh thu trong tab Báo cáo khớp với tiền bán thực tế trong ngày (trừ phần trả hàng/cọc).
 - [ ] Ghi lại mọi lỗi gặp phải (màn hình nào, thao tác nào, thông báo gì) để sửa trước khi dùng thật.
+
+## 7. Kiểm thử trình duyệt: mất mạng + 2 người cùng lúc (mới ngày 2026-11-10)
+
+> Harness `tests/repro-4-bugs.ts` đã mô phỏng mất mạng/đồng thời ở tầng handler (tiêm lỗi
+> ghi, 2 lời gọi cùng lúc) và đều PASS — nhưng đó là bằng chứng mức code, KHÔNG thay thế
+> các bước dưới đây trên trình duyệt thật. Kết quả xem ở `TEST_RESULTS.md` mục G.
+> Chuẩn bị: 2 máy (hoặc 2 tab trình duyệt khác nhau) đăng nhập 2 PIN khác nhau
+> (ví dụ quản trị + thủ kho), 1 sản phẩm thử tồn 10, 1 đơn chờ thử.
+
+### 7a. Ngắt mạng giữa lúc bấm Lưu / Xác nhận / Chốt
+
+- [ ] Mở form phiếu xuất (sản phẩm thử, số lượng 2). Bật chế độ offline của trình duyệt
+  (DevTools → Network → Offline, hoặc tắt wifi) rồi bấm "Ghi phiếu xuất" → app phải báo
+  rõ chưa ghi gì (không hiện phiếu mới trong Lịch sử sau khi bật mạng lại), tồn vẫn 10.
+- [ ] Bật mạng lại, bấm lại đúng phiếu đó 2 lần liên tiếp → chỉ có **1 phiếu** được ghi.
+- [ ] Lặp lại với: tạo đơn xác nhận (2 cái) → tắt mạng ngay trước khi bấm "Tạo đơn" →
+  bật mạng lại → không có đơn mồ côi, tồn vẫn 10; bấm lại 2 lần → chỉ 1 đơn.
+- [ ] Lặp lại với chốt kiểm kê: tạo đợt kiểm kê 2 dòng lệch, tắt mạng, bấm "Chốt" → bật
+  mạng lại → phiếu vẫn nháp, tồn không đổi, không có phiếu điều chỉnh; bấm "Chốt" lại
+  1 lần → tồn đổi đúng 1 lần, mỗi mặt hàng đúng 1 phiếu điều chỉnh (kiểm tra Lịch sử).
+- [ ] Lặp lại với trả hàng và thu nợ: đơn 100đ chưa cọc, tắt mạng, bấm "Trả hàng" hết →
+  bật mạng lại → cọc vẫn 0, trạng thái KHÔNG phải "Đã thanh toán"; bấm lại → trả thành
+  công 1 lần. Tương tự: trả 1 phần 40đ rồi thu 60đ còn lại → đơn "Đã thanh toán" và công
+  nợ còn 0 — hai bên phải khớp nhau.
+
+### 7b. Hai người thao tác cùng lúc (2 máy / 2 tab, 2 PIN khác nhau)
+
+- [ ] Máy A và máy B cùng mở 1 sản phẩm còn 10 cái. Cả hai cùng bấm xuất 3 cái gần như
+  cùng lúc → chỉ 1 người thành công; người còn lại nhận lỗi "số tồn vừa thay đổi, vui
+  lòng tải lại"; tồn cuối = 7, đúng 1 phiếu xuất, không âm.
+- [ ] Hai máy cùng mở 1 đơn đang chờ (2 cái, tồn 10). Cả hai cùng bấm "Xác nhận" gần như
+  cùng lúc → tồn chỉ trừ 1 lần (còn 8), đúng 1 phiếu "Xuất theo đơn hàng", đơn ở trạng
+  thái đã xác nhận. Người còn lại thấy đơn đã xác nhận (tải lại trang), không báo lỗi
+  khó hiểu.
+- [ ] Hai máy cùng mở 1 phiếu kiểm kê nháp (2 dòng lệch). Cả hai cùng bấm "Chốt" gần như
+  cùng lúc → kiểm tra kỹ: tồn mỗi mặt hàng chỉ đổi 1 lần, mỗi mặt hàng đúng 1 phiếu
+  điều chỉnh. **Lưu ý: chốt đồng thời 2 tab vẫn là cửa sổ lỗi còn lại** (xem
+  `CHANGES.md`) — nếu phát hiện điều chỉnh trùng, ghi lại và dùng "Đối chiếu tồn kho"
+  để sửa, đừng chốt tiếp.
+- [ ] Một máy xác nhận đơn, một máy hủy cùng đơn đó gần như cùng lúc → kết quả cuối phải
+  nhất quán: hoặc đơn đã xác nhận (tồn đã trừ, có phiếu xuất) hoặc đơn đã hủy (tồn hoàn
+  lại, có phiếu hoàn kho) — không được vừa trừ vừa hoàn (tồn lệch).
+
+### 7c. Sau các thao tác trên
+
+- [ ] Tab Kiểm kê → "Đối chiếu tồn kho": danh sách lệch phải rỗng sau các thao tác đúng;
+  nếu có lệch, kiểm tra tab Tổng quan → mục "Chờ hoàn kho" có bản ghi sửa chữa ghi rõ
+  lý do (bù trừ thất bại) → dùng "Đối chiếu" để xử lý.
+- [ ] Ghi lại mọi lỗi gặp phải (máy nào, thao tác nào, thông báo gì) để sửa trước khi dùng thật.

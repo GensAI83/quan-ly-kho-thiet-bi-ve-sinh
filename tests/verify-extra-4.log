@@ -1,0 +1,10 @@
+=== KIỂM CHỨNG PHỤ ĐỢT 2 ===
+Ngày chạy: 2026-11-10T01:45:00.469Z
+  [PASS] E1 migration 0001->0005: 18 bảng + index debts_one_active_per_ref — tables=18, index=1
+  [PASS] E2 khôi phục backup có công nợ trùng: thành công, chỉ 1 active, khoản trùng thành cancelled — restored ok=true err=, debts=2 active=1 statuses=open,cancelled
+  [PASS] E3 trả 40đ rồi hủy-mở lại: chỉ 1 hàng nợ, kích hoạt lại còn 60đ (= 100 - 40 hoàn - 0 cọc) — debts=[{"total":60,"paid":0,"status":"open"}]
+  [PASS] E4 hủy giữ hàng: tồn 7 -> 10, giữ 3 -> 0, đơn cancelled, công nợ cancelled — mid stock=7 reserved=3, after stock=10 reserved=0, order=cancelled, debts=cancelled
+  [PASS] E5 hủy đơn 2 lần: tồn 10 sau lần 1, vẫn 10 sau lần 2 — sau lần 1=10, sau lần 2=10, lần 2={"ok":true,"error":null,"pendingRestocks":[]}
+  [PASS] E6 đổi PIN 123456 -> 654321: PIN cũ lỗi, PIN mới đăng nhập được — change={"ok":true,"error":null}, old ok=false, new ok=true
+
+TỔNG PHỤ: 6 PASS, 0 FAIL

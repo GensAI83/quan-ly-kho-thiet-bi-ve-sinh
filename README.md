@@ -50,6 +50,7 @@ bun tests/repro-5-bugs.ts   # harness tái hiện 5 lỗi đã sửa (Bun + SQLi
 - `bun run typecheck`: kiểm tra kiểu cả client và server (đã về 0 lỗi ngày 2026-11-09).
 - `bun run build:server`: đóng gói server thành `server/dist/actions.js`.
 - `bun tests/repro-5-bugs.ts`: 42 kiểm thử (5 nhóm lỗi + hồi quy: tồn không âm, hủy 2 lần, chống gửi trùng) — đều PASS ngày 2026-11-09, xem `TEST_RESULTS.md`.
+- `bun tests/repro-4-bugs.ts`: 18 kiểm thử đợt 2 (4 nhóm lỗi: kiểm kê nhiều mặt hàng, trả hàng sai tiền đã thu, mở lại đơn nhân công nợ, ghi lỗi mất tồn) — đều PASS ngày 2026-11-10 (trước sửa: 4/18), xem `TEST_RESULTS.md` mục E–G.
 - `bun run build:client` (lệnh `bun ./client/build.mjs`) bị SDK chặn có chủ đích khi build tay — thông báo “This web artifact cannot be built by hand… call the `artifact.edit` tool”. Đây không phải lỗi code: artifact sẽ được build/publish lại bằng công cụ artifact khi triển khai. Kiểm tra nhanh bundle client có thể dùng `bun build ./client/src/main.tsx --outdir=/tmp/smoke-out` (chỉ để kiểm tra, cảnh báo `@utility`/`@theme` của Tailwind khi build không qua plugin là bình thường).
 
 ## Ghi chú
