@@ -20,3 +20,5 @@ services:
         generateValue: true
       - key: NODE_ENV
         value: production
+      - key: TZ
+        value: Asia/Ho_Chi_Minh

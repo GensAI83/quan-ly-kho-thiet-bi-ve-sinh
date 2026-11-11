@@ -15,7 +15,7 @@ Phương án đã cấu hình trong `render.yaml`: vùng Singapore, gói `0.5c-5
 1. Tạo tài khoản Render bằng GitHub. Đưa nhánh `codex/cloud-online` đã kiểm tra lên repo trước khi kết nối Blueprint; bản chuẩn bị trên D chưa tự đẩy lên GitHub.
 2. Tạo Blueprint từ đúng nhánh. Kiểm tra chỉ một server và một ổ dữ liệu, không thêm PostgreSQL.
 3. Đặt `KHO_ACCESS_PASSWORD` là mật khẩu truy cập từ xa riêng, tối thiểu 16 ký tự. Không dùng PIN nhân viên hoặc ghi mật khẩu vào repo/chat. `KHO_SESSION_SECRET` được Render sinh tự động.
-4. Render cung cấp HTTPS và `RENDER_EXTERNAL_URL`; ứng dụng chỉ chấp nhận địa chỉ đó. Nếu đổi sang tên miền riêng, đặt `KHO_PUBLIC_URL=https://ten-mien-cua-ban` rồi triển khai lại.
+4. Render cung cấp HTTPS và `RENDER_EXTERNAL_URL`; ứng dụng chỉ chấp nhận địa chỉ đó. Cấu hình `TZ=Asia/Ho_Chi_Minh` giữ ngày báo cáo theo giờ Việt Nam. Nếu đổi sang tên miền riêng, đặt `KHO_PUBLIC_URL=https://ten-mien-cua-ban` rồi triển khai lại.
 5. Chờ `/health` trả `{ "app": "quan-ly-kho-online", "ok": true }`. Mở URL sẽ thấy trang mật khẩu truy cập từ xa.
 
 ## Chuyển dữ liệu hiện có trên D

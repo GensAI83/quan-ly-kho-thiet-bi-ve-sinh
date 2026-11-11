@@ -11,6 +11,6 @@ RUN bun run build:cloud
 FROM oven/bun:1.3.12-slim
 WORKDIR /app
 COPY --from=build /app/dist/cloud ./
-ENV NODE_ENV=production PORT=10000 KHO_DATA_DIR=/var/lib/quan-ly-kho
+ENV NODE_ENV=production PORT=10000 KHO_DATA_DIR=/var/lib/quan-ly-kho TZ=Asia/Ho_Chi_Minh
 EXPOSE 10000
 CMD ["bun", "server.js"]
