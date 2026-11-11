@@ -1,5 +1,6 @@
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
+import { isIP } from "node:net";
 import { createCloudApp } from "./cloud-app";
 
 const root = process.env.KHO_DATA_DIR;
@@ -16,7 +17,13 @@ const backupTimer = setInterval(() => { void app.backup().catch(error => {
 }); }, 60 * 60 * 1000);
 backupTimer.unref();
 const server = Bun.serve({ hostname: "0.0.0.0", port, maxRequestBodySize: 64 * 1024 * 1024,
-  fetch(request) { return stopping ? Response.json({ error: "Ứng dụng đang khởi động lại." }, { status: 503 }) : app.fetch(request); },
+  fetch(request, runtime) {
+    // Render's edge sets X-Forwarded-For. Other hosts use the actual socket peer;
+    // do not trust arbitrary forwarded headers on an exposed standalone server.
+    const forwarded = process.env.RENDER === "true" ? request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() : undefined;
+    const clientAddress = forwarded && isIP(forwarded) ? forwarded : runtime.requestIP(request)?.address ?? "unknown";
+    return stopping ? Response.json({ error: "Ứng dụng đang khởi động lại." }, { status: 503 }) : app.fetch(request, clientAddress);
+  },
   error(error) {
     appendFileSync(join(root, "logs", "server.log"), `${new Date().toISOString()} ${error.stack || error.message}\n`);
     return Response.json({ error: "Ứng dụng gặp lỗi. Hãy kiểm tra kết quả trước khi gửi lại thao tác." }, { status: 500 });

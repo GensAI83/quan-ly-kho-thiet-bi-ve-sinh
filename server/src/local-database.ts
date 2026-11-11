@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite";
 import { drizzle, type BunSQLiteDatabase } from "drizzle-orm/bun-sqlite";
 import type { BatchItem } from "drizzle-orm/batch";
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import * as schema from "./schema";
 
@@ -47,7 +47,14 @@ export function openLocalDatabase(root: string, migrationsDir: string) {
     function snapshot(daily = false) {
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const target = join(root, "backups", daily ? `warehouse-daily-${stamp.slice(0, 10)}.sqlite` : `warehouse-${stamp}.sqlite`);
-      if (!existsSync(target)) writeFileSync(target, sqlite.serialize(), { flag: "wx" });
+      if (!existsSync(target)) {
+        const temporary = target + ".partial-" + randomBytes(8).toString("hex");
+        try {
+          writeFileSync(temporary, sqlite.serialize(), { flag: "wx" });
+          // Publish only a completed image, without replacing an existing snapshot.
+          try { linkSync(temporary, target); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+        } finally { if (existsSync(temporary)) unlinkSync(temporary); }
+      }
       return target;
     }
     snapshot(true);

@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $appRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if ($appRoot -match '^[Cc]:\\') { throw 'Hay giu ung dung tren o D hoac E.' }
 $env:TEMP = Join-Path $appRoot 'temp'

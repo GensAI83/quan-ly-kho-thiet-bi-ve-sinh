@@ -32,7 +32,7 @@ Từ lúc chuyển thành công, dùng **kho online làm dữ liệu chính trê
 
 ## Sao lưu và khôi phục
 
-- Server chụp toàn bộ SQLite khi khởi động, mỗi giờ và khi dừng an toàn, dưới `backups` trên ổ đã gắn. Không cần mở trình duyệt hoặc để máy tính cửa hàng bật.
+- Server chụp toàn bộ SQLite khi khởi động, mỗi giờ và khi dừng an toàn, dưới `backups` trên ổ đã gắn. Không cần mở trình duyệt hoặc để máy tính cửa hàng bật. Giữ tối đa 48 bản tự động, theo ngân sách lớn hơn giữa 128 MB và 3 lần kích thước DB; giữ ít nhất hai bản mới nhất và dự phòng chỗ trống trước khi tạo bản tiếp theo. Bản giữ thủ công và bản trước nhập dữ liệu không bị dọn tự động.
 - Trong app, quản trị viên vẫn có `Nhân viên → Sao lưu & khôi phục → Sao lưu ngay / Xuất JSON`. Trên điện thoại, JSON tải về thiết bị đó; trên máy tính tải theo cài đặt trình duyệt.
 - Các bản `.sqlite` có cả dữ liệu tài khoản/PIN đã băm: giữ kín. File JSON trong app không có PIN.
 - Bản sao trên cùng máy chủ chưa phải sao lưu ở nơi khác. Tải JSON thường xuyên và giữ một bản ngoài server (ổ ngoài hoặc kho cloud riêng). Chưa cấu hình tự sao chép sang dịch vụ khác; dung lượng bản sao cần được theo dõi.

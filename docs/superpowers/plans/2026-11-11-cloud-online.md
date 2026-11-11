@@ -31,17 +31,17 @@
 
 **Interfaces:** createCloudApp({root,migrationsDir,publicDir,publicOrigin,password,sessionSecret}) returns fetch, idle, backup, close and DB inspection for native verification. The existing createLocalApp retains default loopback behavior.
 
-- [ ] Write tests for remote access/session/origin rejection, transactional actions, valid empty-warehouse import, bad/nonempty import and retained data after reopen.
-- [ ] Run them and observe the missing cloud boundary failure.
-- [ ] Implement cloud session gate, fixed-origin adapter, import and scheduled-backup entry point.
-- [ ] Run cloud/native tests, full original regressions and typecheck; commit.
+- [x] Write tests for remote access/session/origin rejection, transactional actions, valid empty-warehouse import, bad/nonempty import and retained data after reopen.
+- [x] Run them and observe the missing cloud boundary failure.
+- [x] Implement cloud session gate, fixed-origin adapter, import and scheduled-backup entry point.
+- [x] Run cloud/native tests, full original regressions and typecheck; commit.
 
 ### Task 2: Build, transfer and deployment package
 
 **Files:** scripts/build-cloud.ts, scripts/transfer-cloud-data.ts, Dockerfile, .dockerignore, render.yaml, docs/ONLINE.md, package scripts; output option in client/build.mjs and generic connection text.
 
-- [ ] Build assets into source/dist/cloud instead of the installed public directory; bundle the cloud server and migrations.
-- [ ] Implement consistent snapshot transfer using a secret supplied through stdin, with HTTPS required and no source DB changes.
-- [ ] Add single-instance persistent-disk hosting configuration and Vietnamese deployment, backup and authoritative-data instructions.
-- [ ] Verify build and native real HTTP/browser workflows at a phone viewport; obtain whole-branch review and fix findings.
+- [x] Build assets into source/dist/cloud instead of the installed public directory; bundle the cloud server and migrations.
+- [x] Implement consistent snapshot transfer using a secret supplied through stdin, with HTTPS required and no source DB changes.
+- [x] Add single-instance persistent-disk hosting configuration and Vietnamese deployment, backup and authoritative-data instructions.
+- [x] Verify build and native real HTTP/browser workflows at a phone viewport; obtain whole-branch review and fix findings.
 - [ ] Deploy/import/verify the real URL if hosting access and billing approval arrive; otherwise hand over the tested package and the exact remaining external requirement.

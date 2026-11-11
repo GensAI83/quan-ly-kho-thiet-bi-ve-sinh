@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSy
 import { join } from "node:path";
 import { createLocalApp } from "./local-app";
 import { checkedRoot } from "./local-database";
+import { pruneCloudBackups } from "./cloud-backups";
 
 type Options = {
   root: string; migrationsDir: string; publicDir: string;
@@ -24,10 +25,19 @@ export function createCloudApp(options: Options) {
   const root = checkedRoot(options.root), origin = publicUrl.origin, now = options.now ?? Date.now;
   const signingKey = createHmac("sha256", options.sessionSecret).update(options.password).digest();
   const passwordHash = digest(options.password);
+  pruneCloudBackups(root);
   let local = createLocalApp({ ...options, root, publicOrigin: origin });
   let closed = false, importing = false;
   let importOperation: Promise<Response> | undefined;
-  let failures: number[] = [];
+  const admittedActions = new Set<Promise<Response>>();
+  const failuresByClient = new Map<string, number[]>();
+  function backupPolicy(reserve = false) {
+    const pages = local.sqlite.query("PRAGMA page_count").get() as { page_count: number };
+    const pageSize = local.sqlite.query("PRAGMA page_size").get() as { page_size: number };
+    const bytes = pages.page_count * pageSize.page_size;
+    return { maxFiles: reserve ? 47 : 48, maxBytes: Math.max(128 * 1024 * 1024, bytes * 3) - (reserve ? bytes : 0),
+      minKeep: 2, reservedFreeBytes: reserve ? bytes + 16 * 1024 * 1024 : 0 };
+  }
   const json = (data: unknown, status = 200) => Response.json(data, { status });
   const sign = (data: string) => createHmac("sha256", signingKey).update(data).digest("base64url");
   function validCookie(request: Request) {
@@ -55,7 +65,8 @@ export function createCloudApp(options: Options) {
     const headers = new Headers(response.headers);
     headers.set("Cache-Control", "no-store");
     headers.set("X-Content-Type-Options", "nosniff");
-    headers.set("Referrer-Policy", "no-referrer");
+    // Keep the same-origin form POST's Origin; no-referrer makes Chromium send null.
+    headers.set("Referrer-Policy", "same-origin");
     headers.set("Strict-Transport-Security", "max-age=31536000");
     headers.set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'");
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
@@ -67,6 +78,7 @@ export function createCloudApp(options: Options) {
     return tables.every(({ name }) => (local.sqlite.query(`SELECT COUNT(*) AS n FROM "${name.replaceAll('"', '""')}"`).get() as { n: number }).n === 0);
   }
   async function importDatabase(request: Request) {
+    await Promise.allSettled([...admittedActions]);
     await local.idle();
     if (!emptyWarehouse()) return json({ error: "Kho online đã có dữ liệu. Không ghi đè; chỉ được chuyển dữ liệu vào kho online mới, trước lần đăng nhập PIN đầu tiên." }, 409);
     if (request.headers.get("Content-Type") !== "application/vnd.sqlite3") return json({ error: "Cần một bản sao SQLite hợp lệ." }, 415);
@@ -95,6 +107,12 @@ export function createCloudApp(options: Options) {
       rmdirSync(stageDir);
       return json({ error: "Bản chuyển dữ liệu bị hỏng hoặc không cùng phiên bản. Dữ liệu hiện tại được giữ nguyên." }, 400);
     }
+    // A second guard protects activation if admission rules are changed later.
+    if (!emptyWarehouse()) {
+      for (const suffix of ["", "-wal", "-shm"]) if (existsSync(stageFile + suffix)) unlinkSync(stageFile + suffix);
+      rmdirSync(stageDir);
+      return json({ error: "Kho online vừa có dữ liệu. Không ghi đè; hãy kiểm tra lại trước khi chuyển." }, 409);
+    }
     const filename = join(root, "data", "warehouse.sqlite");
     const oldFile = join(root, "backups", `warehouse-before-import-${randomBytes(12).toString("hex")}.sqlite`);
     local.close();
@@ -116,7 +134,7 @@ export function createCloudApp(options: Options) {
       rmdirSync(stageDir);
     }
   }
-  async function handle(request: Request): Promise<Response> {
+  async function handle(request: Request, clientAddress: string): Promise<Response> {
     const url = new URL(request.url), path = url.pathname;
     if (closed) return json({ error: "Ứng dụng đang tắt." }, 503);
     if (path === "/health" && request.method === "GET") return json({ app: "quan-ly-kho-online", ok: true });
@@ -126,14 +144,17 @@ export function createCloudApp(options: Options) {
     if (path === "/cloud/login") {
       if (request.method === "GET") return loginPage();
       if (request.method !== "POST") return json({ error: "Phương thức không hợp lệ." }, 405);
-      failures = failures.filter(at => at > now() - 60000);
+      const key = clientAddress.slice(0, 128);
+      if (!failuresByClient.has(key) && failuresByClient.size >= 4096) failuresByClient.delete(failuresByClient.keys().next().value!);
+      const failures = (failuresByClient.get(key) ?? []).filter(at => at > now() - 60000);
+      failuresByClient.set(key, failures);
       if (failures.length >= 10) return new Response("Bạn đã thử quá nhiều lần. Vui lòng đợi một phút.", { status: 429, headers: { "Retry-After": "60" } });
       if (!request.headers.get("Content-Type")?.startsWith("application/x-www-form-urlencoded")) return json({ error: "Dữ liệu đăng nhập không hợp lệ." }, 415);
       const raw = await request.text();
       if (raw.length > 4096) return json({ error: "Dữ liệu đăng nhập quá lớn." }, 413);
       const supplied = new URLSearchParams(raw).get("password") ?? "";
       if (!timingSafeEqual(digest(supplied), passwordHash)) { failures.push(now()); return loginPage("Mật khẩu không đúng."); }
-      failures = [];
+      failuresByClient.delete(key);
       return new Response(null, { status: 303, headers: { Location: "/", "Set-Cookie": sessionCookie() } });
     }
     if (!validCookie(request)) {
@@ -149,13 +170,26 @@ export function createCloudApp(options: Options) {
       importOperation = importDatabase(request);
       try { return await importOperation; } finally { importing = false; importOperation = undefined; }
     }
-    return local.fetch(request);
+    const operation = local.fetch(request);
+    admittedActions.add(operation);
+    try { return await operation; } finally { admittedActions.delete(operation); }
   }
   return {
-    async fetch(request: Request) { return secured(await handle(request)); },
+    async fetch(request: Request, clientAddress = "unknown") { return secured(await handle(request, clientAddress)); },
     get sqlite() { return local.sqlite; },
-    async idle() { if (importOperation) await importOperation; await local.idle(); },
-    async backup() { if (importOperation) await importOperation; await local.idle(); return local.snapshot(); },
-    close() { if (!closed) { local.close(); closed = true; } },
+    async idle() { if (importOperation) await importOperation; await Promise.allSettled([...admittedActions]); await local.idle(); },
+    async backup() {
+      if (importOperation) await importOperation;
+      await Promise.allSettled([...admittedActions]); await local.idle();
+      if (closed) return;
+      pruneCloudBackups(root, backupPolicy(true));
+      const path = local.snapshot(); pruneCloudBackups(root, backupPolicy()); return path;
+    },
+    close() {
+      if (!closed) {
+        const policy = backupPolicy();
+        pruneCloudBackups(root, backupPolicy(true)); local.close(); closed = true; pruneCloudBackups(root, policy);
+      }
+    },
   };
 }

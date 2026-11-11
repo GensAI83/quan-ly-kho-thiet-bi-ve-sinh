@@ -58,6 +58,14 @@ test("remote cookie is secure and wrong passwords are throttled", async () => {
   expect(blocked.status).toBe(429);
 });
 
+test("failed passwords from one client cannot lock out a different client", async () => {
+  const app = fresh();
+  const request = (supplied: string) => new Request(origin + "/cloud/login", { method: "POST", headers: { Origin: origin,
+    "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ password: supplied }) });
+  for (let i = 0; i < 10; i++) await app.fetch(request("wrong"), "198.51.100.10");
+  expect((await app.fetch(request(password), "198.51.100.20")).status).toBe(303);
+});
+
 test("tampered cookies, unexpected hosts and cross-origin writes cannot access warehouse actions", async () => {
   const app = fresh(), cookie = await gate(app);
   expect((await rpc(app, cookie + "tampered", "loginStaff", { pin: "123456" })).response.status).toBe(401);
@@ -140,4 +148,23 @@ test("expired remote sessions and password rotation invalidate access", async ()
   app.close(); opened.splice(opened.indexOf(app), 1);
   const changed = fresh({ root, password: "a-different-remote-password-741852" });
   expect((await rpc(changed, cookie, "loginStaff", { pin: "123456" })).response.status).toBe(401);
+});
+
+test("an already admitted slow action finishes before import checks whether the warehouse is empty", async () => {
+  const app = fresh(), cookie = await gate(app), initialDatabase = app.sqlite.serialize();
+  let actionBody!: ReadableStreamDefaultController<Uint8Array>;
+  const admitted = app.fetch(new Request(origin + "/actions", { method: "POST", headers: {
+    Cookie: cookie, Origin: origin, "Content-Type": "application/json",
+  }, body: new ReadableStream<Uint8Array>({ start(controller) { actionBody = controller; } }) }));
+  let importBody!: ReadableStreamDefaultController<Uint8Array>;
+  const imported = app.fetch(new Request(origin + "/cloud/import", { method: "POST", headers: {
+    Cookie: cookie, Origin: origin, "Content-Type": "application/vnd.sqlite3",
+  }, body: new ReadableStream<Uint8Array>({ start(controller) { importBody = controller; } }) }));
+  // Let the importer reach its first awaited step while the old request body is pending.
+  await Bun.sleep(10);
+  actionBody.enqueue(new TextEncoder().encode(JSON.stringify({ action: "loginStaff", args: { pin: "123456" } }))); actionBody.close();
+  expect((await (await admitted).json() as any).ok).toBe(true);
+  importBody.enqueue(initialDatabase); importBody.close();
+  expect((await imported).status).toBe(409);
+  expect(app.sqlite.query("SELECT COUNT(*) AS n FROM staff").get()).toEqual({ n: 1 });
 });

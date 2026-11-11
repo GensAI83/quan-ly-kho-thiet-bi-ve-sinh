@@ -7,7 +7,6 @@ services:
     numInstances: 1
     autoDeployTrigger: off
     healthCheckPath: /health
-    maxShutdownDelaySeconds: 60
     disk:
       name: warehouse-data
       mountPath: /var/lib/quan-ly-kho
