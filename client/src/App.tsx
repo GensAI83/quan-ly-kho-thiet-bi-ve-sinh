@@ -59,7 +59,7 @@ function newRequestKey(): string {
 }
 function netErrMsg(e: unknown): string {
   const m = e instanceof Error ? e.message : String(e);
-  if (/network|fetch|failed to fetch|load failed|offline/i.test(m)) return "Không kết nối được ứng dụng trên máy. Hãy mở lại bằng nút Mở kho; kiểm tra lịch sử trước khi gửi lại thao tác.";
+  if (/network|fetch|failed to fetch|load failed|offline/i.test(m)) return process.env.KHO_DEPLOYMENT_MODE === "online" ? "Không kết nối được kho online. Kiểm tra Internet; kiểm tra lịch sử trước khi gửi lại thao tác." : "Không kết nối được ứng dụng trên máy. Hãy mở lại bằng nút Mở kho; kiểm tra lịch sử trước khi gửi lại thao tác.";
   return m;
 }
 function downloadBlob(blob: Blob, filename: string) {
@@ -1476,7 +1476,7 @@ export function App() {
       {toast && <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] max-w-[92vw] rounded-2xl bg-[var(--text)] text-[var(--bg)] text-sm font-semibold px-4 py-3 shadow-lg">{toast}</div>}
       {!online && (
         <div className="sticky top-0 z-50 bg-[var(--red)] text-white px-4 py-3 flex items-center justify-between gap-3">
-          <p className="text-sm font-bold">⚠ Chưa kết nối được ứng dụng trên máy — hãy mở lại bằng nút Mở kho</p>
+          <p className="text-sm font-bold">{process.env.KHO_DEPLOYMENT_MODE === "online" ? "⚠ Chưa kết nối được kho online — kiểm tra Internet rồi tải lại trang" : "⚠ Chưa kết nối được ứng dụng trên máy — hãy mở lại bằng nút Mở kho"}</p>
           <button className="shrink-0 rounded-lg bg-white text-[var(--red)] font-bold text-sm px-3 py-1.5" onClick={() => qc.invalidateQueries()}>Thử lại</button>
         </div>
       )}

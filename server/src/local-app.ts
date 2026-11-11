@@ -4,7 +4,7 @@ import { Actions } from "./actions";
 import { openLocalDatabase } from "./local-database";
 
 export const APP_ID = "quan-ly-kho-local";
-type Options = { root: string; migrationsDir: string; publicDir: string };
+type Options = { root: string; migrationsDir: string; publicDir: string; publicOrigin?: string };
 
 export function createLocalApp(options: Options) {
   const storage = openLocalDatabase(options.root, options.migrationsDir);
@@ -18,9 +18,10 @@ export function createLocalApp(options: Options) {
   async function fetch(request: Request): Promise<Response> {
     if (closed) return json({ error: "Ứng dụng đang tắt." }, 503);
     const url = new URL(request.url);
-    if (!["127.0.0.1", "localhost"].includes(url.hostname)) return json({ error: "Chỉ truy cập trên máy này." }, 403);
+    const configuredOrigin = options.publicOrigin ? new URL(options.publicOrigin) : undefined;
+    if (configuredOrigin ? url.host !== configuredOrigin.host : !["127.0.0.1", "localhost"].includes(url.hostname)) return json({ error: "Nguồn truy cập không được phép." }, 403);
     const origin = request.headers.get("Origin");
-    if (origin && origin !== url.origin) return json({ error: "Nguồn truy cập không được phép." }, 403);
+    if (origin && origin !== (configuredOrigin?.origin ?? url.origin)) return json({ error: "Nguồn truy cập không được phép." }, 403);
     if (url.pathname === "/health" && request.method === "GET") return json({ app: APP_ID, ok: true });
     if (url.pathname === "/actions" && request.method === "POST") {
       if (!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")) return json({ error: "Yêu cầu phải là JSON." }, 415);

@@ -1,0 +1,17 @@
+.git
+node_modules
+dist
+.bun-cache
+cache
+.superpowers
+.env*
+*.sqlite
+*.sqlite-*
+data
+backups
+exports
+logs
+temp
+checks
+browser-profile
+browser-cache

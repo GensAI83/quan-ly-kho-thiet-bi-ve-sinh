@@ -9,7 +9,7 @@ export const api = new Proxy({}, {
     return async (args: unknown) => {
       const response = await fetch("/actions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, args }) });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "Không kết nối được ứng dụng trên máy.");
+      if (!response.ok) throw new Error(data.error || "Không kết nối được ứng dụng.");
       return data;
     };
   },

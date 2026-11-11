@@ -12,3 +12,12 @@ server/dist/
 app.db
 *.tsbuildinfo
 *.muse-github-snapshot-sync.json
+data/
+backups/
+exports/
+logs/
+temp/
+checks/
+*.sqlite
+*.sqlite-*
+.env*

@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: quan-ly-kho-online
+    runtime: docker
+    region: singapore
+    plan: 0.5c-512mb
+    numInstances: 1
+    autoDeployTrigger: off
+    healthCheckPath: /health
+    maxShutdownDelaySeconds: 60
+    disk:
+      name: warehouse-data
+      mountPath: /var/lib/quan-ly-kho
+      sizeGB: 1
+    envVars:
+      - key: KHO_DATA_DIR
+        value: /var/lib/quan-ly-kho
+      - key: KHO_ACCESS_PASSWORD
+        sync: false
+      - key: KHO_SESSION_SECRET
+        generateValue: true
+      - key: NODE_ENV
+        value: production

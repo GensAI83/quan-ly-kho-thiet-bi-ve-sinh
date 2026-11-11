@@ -7,7 +7,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.local.json",
     "test": "bun scripts/run-checks.ts",
     "build": "bun scripts/build-local.ts",
-    "build:client": "bun ./client/build.mjs"
+    "build:client": "bun ./client/build.mjs",
+    "build:cloud": "bun scripts/build-cloud.ts",
+    "start:cloud": "bun dist/cloud/server.js"
   },
   "dependencies": {
     "@tanstack/react-query": "5.100.10",
