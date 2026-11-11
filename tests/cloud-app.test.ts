@@ -66,6 +66,14 @@ test("failed passwords from one client cannot lock out a different client", asyn
   expect((await app.fetch(request(password), "198.51.100.20")).status).toBe(303);
 });
 
+test("concurrent bad logins accumulate in the same client's rate limit", async () => {
+  const app = fresh();
+  const request = (supplied: string) => new Request(origin + "/cloud/login", { method: "POST", headers: { Origin: origin,
+    "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ password: supplied }) });
+  await Promise.all(Array.from({ length: 20 }, () => app.fetch(request("wrong"), "198.51.100.30")));
+  expect((await app.fetch(request(password), "198.51.100.30")).status).toBe(429);
+});
+
 test("tampered cookies, unexpected hosts and cross-origin writes cannot access warehouse actions", async () => {
   const app = fresh(), cookie = await gate(app);
   expect((await rpc(app, cookie + "tampered", "loginStaff", { pin: "123456" })).response.status).toBe(401);

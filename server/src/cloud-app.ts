@@ -144,14 +144,16 @@ export function createCloudApp(options: Options) {
     if (path === "/cloud/login") {
       if (request.method === "GET") return loginPage();
       if (request.method !== "POST") return json({ error: "Phương thức không hợp lệ." }, 405);
+      if (!request.headers.get("Content-Type")?.startsWith("application/x-www-form-urlencoded")) return json({ error: "Dữ liệu đăng nhập không hợp lệ." }, 415);
+      const raw = await request.text();
+      if (raw.length > 4096) return json({ error: "Dữ liệu đăng nhập quá lớn." }, 413);
+      // Read and mutate the current bucket in one synchronous section after the
+      // awaited body, so simultaneous requests cannot update detached arrays.
       const key = clientAddress.slice(0, 128);
       if (!failuresByClient.has(key) && failuresByClient.size >= 4096) failuresByClient.delete(failuresByClient.keys().next().value!);
       const failures = (failuresByClient.get(key) ?? []).filter(at => at > now() - 60000);
       failuresByClient.set(key, failures);
       if (failures.length >= 10) return new Response("Bạn đã thử quá nhiều lần. Vui lòng đợi một phút.", { status: 429, headers: { "Retry-After": "60" } });
-      if (!request.headers.get("Content-Type")?.startsWith("application/x-www-form-urlencoded")) return json({ error: "Dữ liệu đăng nhập không hợp lệ." }, 415);
-      const raw = await request.text();
-      if (raw.length > 4096) return json({ error: "Dữ liệu đăng nhập quá lớn." }, 413);
       const supplied = new URLSearchParams(raw).get("password") ?? "";
       if (!timingSafeEqual(digest(supplied), passwordHash)) { failures.push(now()); return loginPage("Mật khẩu không đúng."); }
       failuresByClient.delete(key);
